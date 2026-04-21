@@ -53,3 +53,9 @@
 ### 按钮位置调整
 
 - 按住右侧悬浮按钮拖动，可以调整按钮位置
+
+## 反馈
+
+如发现 Bug 或希望增加功能，欢迎提交 Issue 或 PR：
+
+- GitHub: https://github.com/W-ArcherEmiya/TikTok-downloader.git
