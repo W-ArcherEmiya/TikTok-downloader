@@ -1,8 +1,8 @@
-﻿// ==UserScript==
+// ==UserScript==
 // @name         Douyin Downloader
 // @namespace    https://github.com/W-ArcherEmiya
-// @version      3.6.4
-// @description  Download the current Douyin video or batch-download videos from a profile page.
+// @version      1.7.3
+// @description  下载当前抖音网页视频，并支持在个人主页批量选择视频下载。
 // @author       ArcherEmiya
 // @match        *://*.douyin.com/*
 // @match        *://douyin.com/*
@@ -11,7 +11,7 @@
 // @grant        GM_addStyle
 // @grant        GM_download
 // @connect      *
-// @license      MIT License
+// @license      MIT
 // @run-at       document-idle
 // ==/UserScript==
 

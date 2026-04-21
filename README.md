@@ -1,49 +1,55 @@
-# Douyin Downloader
+# 抖音网页下载器
 
-A Tampermonkey userscript for downloading the current Douyin web video or batch-selecting videos from a Douyin profile page.
+一个用于抖音网页视频下载脚本，支持下载当前视频，以及在个人主页中批量扫描后按需勾选下载。
 
-## Features
+## 功能特性
 
-- Download the current Douyin video from video pages and `jingxuan` pages
-- Batch scan a profile page, then choose which videos to download
-- Clean and readable file naming for both single and batch downloads
-- Floating side button with drag positioning
-- Visible progress bubble for single downloads and batch scanning
+- 下载当前打开的抖音网页视频
+- 在个人主页扫描视频列表后，勾选任意视频批量下载
+- 单个下载与批量下载分别使用更清晰的文件命名
+- 提供可拖动的侧边下载按钮
+- 提供单视频下载进度与批量扫描状态提示
 
-## Files
 
-- `douyin-downloader.user.js`: the userscript file to publish on Greasy Fork and install in Tampermonkey
+## 最近更新
 
-## Local Development
+当前版本：`1.7.3`
 
-1. Edit `douyin-downloader.user.js`
-2. Reload the script in Tampermonkey
-3. Test on Douyin web pages
+### 1.7.3
 
-## Publish To Greasy Fork
+- 个人主页批量下载改为先在按钮左侧显示扫描进度
+- 扫描和解析完成后再弹出批量选择窗口
 
-1. Create a new script on Greasy Fork
-2. Upload or paste the contents of `douyin-downloader.user.js`
-3. After the GitHub repository is finalized, update the metadata block with:
-   - `@homepageURL`
-   - `@supportURL`
-   - `@updateURL`
-   - `@downloadURL`
+### 1.7.2
 
-## Sync To GitHub
+- 状态气泡调整到按钮左侧
+- 状态气泡仅在点击按钮后显示
+- 动作完成后状态气泡自动消失
 
-Recommended repository name:
+## 安装
 
-- `W-ArcherEmiya/douyin-downloader`
+先安装浏览器扩展 [Tampermonkey](https://www.tampermonkey.net/)。
 
-Recommended file layout:
+然后通过 Greasy Fork 安装脚本：
 
-- `README.md`
-- `LICENSE`
-- `.gitignore`
-- `douyin-downloader.user.js`
+[安装 抖音网页下载器](https://greasyfork.org/zh-CN/scripts/574899-douyin-downloader)
 
-## Notes
+## 使用方式
 
-- This project targets the Douyin web UI and may require maintenance when Douyin changes page structure.
-- The script is provided under the MIT License.
+### 单个视频下载
+
+1. 打开任意抖音视频页面
+2. 点击右侧悬浮下载按钮
+3. 等待左侧状态提示完成后开始下载
+
+### 个人主页批量下载
+
+1. 打开任意抖音个人主页
+2. 点击右侧悬浮下载按钮
+3. 等待脚本扫描并解析主页视频
+4. 在弹出的批量窗口中勾选需要下载的视频
+5. 点击 `Download selected` 开始下载
+
+### 按钮位置调整
+
+- 按住右侧悬浮按钮拖动，可以调整按钮位置
