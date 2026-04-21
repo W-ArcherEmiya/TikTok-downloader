@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Douyin Downloader
 // @namespace    https://github.com/W-ArcherEmiya
-// @version      1.7.3
+// @version      1.7.4
 // @description  下载当前抖音网页视频，并支持在个人主页批量选择视频下载。
 // @author       ArcherEmiya
 // @match        *://*.douyin.com/*
@@ -10,6 +10,7 @@
 // @exclude      *://lf-zt.douyin.com/*
 // @grant        GM_addStyle
 // @grant        GM_download
+// @grant        GM_xmlhttpRequest
 // @connect      *
 // @license      MIT
 // @run-at       document-idle
@@ -27,6 +28,8 @@
     const BATCH_MODAL_LIST_ID = `${SCRIPT_ID}-batch-list`;
     const BATCH_MODAL_SUMMARY_ID = `${SCRIPT_ID}-batch-summary`;
     const BATCH_SEARCH_ID = `${SCRIPT_ID}-batch-search`;
+    const BATCH_PICK_DIR_ID = `${SCRIPT_ID}-batch-pick-dir`;
+    const BATCH_DIR_HINT_ID = `${SCRIPT_ID}-batch-dir-hint`;
     const BATCH_SELECT_ALL_ID = `${SCRIPT_ID}-batch-select-all`;
     const BATCH_CLEAR_ALL_ID = `${SCRIPT_ID}-batch-clear-all`;
     const BATCH_START_ID = `${SCRIPT_ID}-batch-start`;
@@ -59,6 +62,8 @@
         batchEntries: [],
         batchModalOpen: false,
         batchSearchTerm: '',
+        batchDirectoryHandle: null,
+        batchDirectoryName: '',
         batchModalLoading: false,
         batchLoadingMessage: '',
         toggleLabel: 'Download video',
@@ -359,6 +364,15 @@
             gap: 10px;
             align-items: center;
             min-width: 0;
+        }
+
+        #${BATCH_DIR_HINT_ID} {
+            font-size: 12px;
+            color: rgba(255, 255, 255, 0.72);
+            max-width: 240px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
 
         #${BATCH_MODAL_ID} .${SCRIPT_ID}-dialog-actions {
@@ -750,17 +764,97 @@
         return getBatchEntries().filter((entry) => entry.selected && entry.available);
     }
 
+    function isDirectoryPickerSupported() {
+        return typeof window.showDirectoryPicker === 'function';
+    }
+
+    function updateBatchDirectoryHint() {
+        const hint = document.getElementById(BATCH_DIR_HINT_ID);
+        const pickButton = document.getElementById(BATCH_PICK_DIR_ID);
+        if (hint) {
+            hint.textContent = state.batchDirectoryName
+                ? `Download folder: ${state.batchDirectoryName}`
+                : (isDirectoryPickerSupported() ? 'Download folder: not selected' : 'Download folder: browser not supported');
+        }
+
+        if (pickButton) {
+            pickButton.disabled = state.batchModalLoading || isBusy() || !isDirectoryPickerSupported();
+        }
+    }
+
+    async function pickBatchDownloadDirectory() {
+        if (!isDirectoryPickerSupported()) {
+            setBatchSummaryMessage('Your browser does not support selecting a batch download folder.');
+            return;
+        }
+
+        try {
+            const handle = await window.showDirectoryPicker({
+                mode: 'readwrite',
+            });
+
+            state.batchDirectoryHandle = handle;
+            state.batchDirectoryName = handle?.name || '';
+            updateBatchDirectoryHint();
+            updateBatchModalSummary();
+        } catch (error) {
+            if (error?.name === 'AbortError') {
+                return;
+            }
+
+            console.error('[Douyin Downloader] Failed to pick batch directory.', error);
+            setBatchSummaryMessage(`Folder selection failed: ${error.message}`);
+        }
+    }
+
+    async function ensureWritableBatchDirectory() {
+        const handle = state.batchDirectoryHandle;
+        if (!handle) {
+            return null;
+        }
+
+        if (typeof handle.queryPermission === 'function') {
+            let permission = await handle.queryPermission({
+                mode: 'readwrite',
+            });
+
+            if (permission !== 'granted' && typeof handle.requestPermission === 'function') {
+                permission = await handle.requestPermission({
+                    mode: 'readwrite',
+                });
+            }
+
+            if (permission !== 'granted') {
+                throw new Error('Batch download folder permission was denied');
+            }
+        }
+
+        return handle;
+    }
+
+    function setBatchSummaryMessage(message) {
+        const summary = document.getElementById(BATCH_MODAL_SUMMARY_ID);
+        if (summary) {
+            summary.textContent = message;
+        }
+    }
+
     function setBatchModalLoading(loading, message = '') {
         state.batchModalLoading = Boolean(loading);
         state.batchLoadingMessage = message || '';
 
         const searchInput = document.getElementById(BATCH_SEARCH_ID);
+        const pickDirButton = document.getElementById(BATCH_PICK_DIR_ID);
         const selectAllButton = document.getElementById(BATCH_SELECT_ALL_ID);
         const clearAllButton = document.getElementById(BATCH_CLEAR_ALL_ID);
         const startButton = document.getElementById(BATCH_START_ID);
 
         if (searchInput) {
             searchInput.disabled = state.batchModalLoading;
+        }
+
+        if (pickDirButton) {
+            pickDirButton.disabled = state.batchModalLoading || isBusy() || !isDirectoryPickerSupported();
         }
 
         if (selectAllButton) {
@@ -776,6 +870,7 @@
         }
 
         renderBatchModalList();
+        updateBatchDirectoryHint();
     }
 
     function updateBatchModalSummary() {
@@ -800,6 +895,8 @@
             startButton.disabled = state.batchModalLoading || selectedCount === 0 || isBusy();
             startButton.textContent = selectedCount > 0 ? `Download selected (${selectedCount})` : 'Download selected';
         }
+
+        updateBatchDirectoryHint();
     }
 
     function renderBatchModalList() {
@@ -1466,6 +1563,19 @@
         }, 1500);
     }
 
+    async function saveBlobToDirectory(directoryHandle, filename, blob) {
+        const fileHandle = await directoryHandle.getFileHandle(filename, {
+            create: true,
+        });
+        const writable = await fileHandle.createWritable();
+
+        try {
+            await writable.write(blob);
+        } finally {
+            await writable.close();
+        }
+    }
+
     function gmDownload(url, filename, onProgress) {
         if (typeof GM_download !== 'function') {
             return Promise.reject(new Error('GM_download is unavailable'));
@@ -1498,7 +1608,53 @@
         });
     }
 
-    async function downloadVideoUrl(videoUrl, filename, onProgress) {
+    function gmFetchBlob(url, onProgress) {
+        if (typeof GM_xmlhttpRequest !== 'function') {
+            return Promise.reject(new Error('GM_xmlhttpRequest is unavailable'));
+        }
+
+        return new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url,
+                responseType: 'blob',
+                timeout: 120000,
+                onprogress: (event) => {
+                    if (typeof onProgress !== 'function') {
+                        return;
+                    }
+
+                    onProgress({
+                        phase: 'downloading',
+                        loaded: Number(event?.loaded) || 0,
+                        total: Number(event?.total) || 0,
+                    });
+                },
+                onload: (response) => {
+                    const blob = response?.response;
+                    if (!(blob instanceof Blob) || !blob.size) {
+                        reject(new Error('GM_xmlhttpRequest returned an empty response'));
+                        return;
+                    }
+
+                    resolve({
+                        blob,
+                        total: Number(response?.responseHeaders?.match(/content-length:\s*(\d+)/i)?.[1]) || blob.size,
+                    });
+                },
+                onerror: (error) => {
+                    reject(new Error(error?.error || 'GM_xmlhttpRequest failed'));
+                },
+                ontimeout: () => {
+                    reject(new Error('GM_xmlhttpRequest timeout'));
+                },
+            });
+        });
+    }
+
+    async function downloadVideoUrl(videoUrl, filename, onProgress, options = {}) {
+        const directoryHandle = options.directoryHandle || null;
+
         if (typeof onProgress === 'function') {
             onProgress({
                 phase: 'requesting',
@@ -1507,7 +1663,7 @@
             });
         }
 
-        if (typeof GM_download === 'function') {
+        if (!directoryHandle && typeof GM_download === 'function') {
             try {
                 await gmDownload(videoUrl, filename, onProgress);
                 return;
@@ -1516,65 +1672,101 @@
             }
         }
 
-        const response = await fetch(videoUrl, {
-            credentials: 'include',
-        });
-
-        if (!response.ok) {
-            throw new Error(`HTTP ${response.status}`);
-        }
-
-        const total = Number(response.headers.get('content-length')) || 0;
-
-        if (!response.body || typeof response.body.getReader !== 'function') {
-            const blob = await response.blob();
+        if (directoryHandle) {
             if (typeof onProgress === 'function') {
                 onProgress({
-                    phase: 'downloading',
-                    loaded: blob.size,
-                    total: total || blob.size,
+                    phase: 'requesting',
+                    loaded: 0,
+                    total: 0,
                 });
             }
 
+            try {
+                const result = await gmFetchBlob(videoUrl, onProgress);
+                await saveBlobToDirectory(directoryHandle, filename, result.blob);
+                return;
+            } catch (error) {
+                console.warn('[Douyin Downloader] Directory download via GM_xmlhttpRequest failed, falling back to fetch.', error);
+            }
+        }
+
+        try {
+            const response = await fetch(videoUrl, {
+                credentials: 'include',
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+
+            const total = Number(response.headers.get('content-length')) || 0;
+
+            if (!response.body || typeof response.body.getReader !== 'function') {
+                const blob = await response.blob();
+                if (typeof onProgress === 'function') {
+                    onProgress({
+                        phase: 'downloading',
+                        loaded: blob.size,
+                        total: total || blob.size,
+                    });
+                }
+
+                if (!blob.size) {
+                    throw new Error('Empty response body');
+                }
+
+                if (directoryHandle) {
+                    await saveBlobToDirectory(directoryHandle, filename, blob);
+                } else {
+                    triggerBrowserDownload(blob, filename);
+                }
+                return;
+            }
+
+            const reader = response.body.getReader();
+            const chunks = [];
+            let loaded = 0;
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) {
+                    break;
+                }
+
+                if (value) {
+                    chunks.push(value);
+                    loaded += value.byteLength;
+                    if (typeof onProgress === 'function') {
+                        onProgress({
+                            phase: 'downloading',
+                            loaded,
+                            total,
+                        });
+                    }
+                }
+            }
+
+            const blob = new Blob(chunks, {
+                type: response.headers.get('content-type') || 'video/mp4',
+            });
             if (!blob.size) {
                 throw new Error('Empty response body');
             }
 
-            triggerBrowserDownload(blob, filename);
-            return;
-        }
-
-        const reader = response.body.getReader();
-        const chunks = [];
-        let loaded = 0;
-
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) {
-                break;
+            if (directoryHandle) {
+                await saveBlobToDirectory(directoryHandle, filename, blob);
+            } else {
+                triggerBrowserDownload(blob, filename);
+            }
+        } catch (error) {
+            if (directoryHandle && typeof GM_download === 'function') {
+                console.warn('[Douyin Downloader] Directory download via fetch failed, falling back to browser download.', error);
+                await gmDownload(videoUrl, filename, onProgress);
+                return;
             }
 
-            if (value) {
-                chunks.push(value);
-                loaded += value.byteLength;
-                if (typeof onProgress === 'function') {
-                    onProgress({
-                        phase: 'downloading',
-                        loaded,
-                        total,
-                    });
-                }
-            }
+            throw error;
         }
-
-        const blob = new Blob(chunks, {
-            type: response.headers.get('content-type') || 'video/mp4',
-        });
-        if (!blob.size) {
-            throw new Error('Empty response body');
-        }
-
-        triggerBrowserDownload(blob, filename);
     }
 
     function normalizeVideoPageUrl(href) {
@@ -2676,6 +2868,7 @@
         try {
             let successCount = 0;
             const filenameMap = buildUniqueBatchFilenames(selectedEntries);
+            const directoryHandle = await ensureWritableBatchDirectory();
 
             for (let index = 0; index < selectedEntries.length; index += 1) {
                 const entry = selectedEntries[index];
@@ -2683,7 +2876,12 @@
                 setStatus(`Downloading ${index + 1}/${selectedEntries.length}...\n${entry.meta.title}`);
 
                 try {
-                    await downloadVideoUrl(entry.videoUrl, filenameMap.get(entry.id) || buildFilename(entry.meta));
+                    await downloadVideoUrl(
+                        entry.videoUrl,
+                        filenameMap.get(entry.id) || buildFilename(entry.meta),
+                        null,
+                        { directoryHandle }
+                    );
                     successCount += 1;
                 } catch (error) {
                     console.error('[Douyin Downloader] Selected batch item failed.', entry.pageUrl, error);
@@ -2727,8 +2925,11 @@
             }
 
             const entries = await buildBatchEntriesFromLinks(links);
+            setMode('idle');
             setStatus(`Batch list ready.\nChoose the videos you want to download.`);
             openBatchModal(entries);
+            updateBatchDirectoryHint();
+            updateBatchModalSummary();
         } catch (error) {
             console.error('[Douyin Downloader] Batch download failed.', error);
             setBatchModalLoading(false);
@@ -2921,8 +3122,23 @@
 
         toolbarLeft.appendChild(searchInput);
 
+        const dirHint = document.createElement('div');
+        dirHint.id = BATCH_DIR_HINT_ID;
+        dirHint.textContent = isDirectoryPickerSupported() ? 'Download folder: not selected' : 'Download folder: browser not supported';
+        toolbarLeft.appendChild(dirHint);
+
         const toolbarRight = document.createElement('div');
         toolbarRight.className = `${SCRIPT_ID}-toolbar-group`;
+
+        const pickDirButton = document.createElement('button');
+        pickDirButton.id = BATCH_PICK_DIR_ID;
+        pickDirButton.type = 'button';
+        pickDirButton.className = `${SCRIPT_ID}-text-button`;
+        pickDirButton.textContent = 'Choose folder';
+        pickDirButton.disabled = !isDirectoryPickerSupported();
+        pickDirButton.addEventListener('click', () => {
+            void pickBatchDownloadDirectory();
+        });
 
         const selectAllButton = document.createElement('button');
         selectAllButton.id = BATCH_SELECT_ALL_ID;
@@ -2942,6 +3158,7 @@
             setAllBatchSelections(false);
         });
 
+        toolbarRight.appendChild(pickDirButton);
         toolbarRight.appendChild(selectAllButton);
         toolbarRight.appendChild(clearAllButton);
         toolbar.appendChild(toolbarLeft);
@@ -2990,6 +3207,8 @@
                 closeBatchModal();
             }
         });
+
+        updateBatchDirectoryHint();
     }
 
     function installObservers() {
@@ -3064,6 +3283,3 @@
 
     boot();
 })();
-
-
-
