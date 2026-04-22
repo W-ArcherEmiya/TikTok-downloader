@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Douyin Downloader
+// @name         抖音视频下载（Douyin Downloader）
 // @namespace    https://github.com/W-ArcherEmiya
-// @version      1.7.18
+// @version      1.7.19
 // @description  下载当前抖音网页视频，并支持在个人主页批量选择视频下载。
 // @author       ArcherEmiya
 // @match        *://*.douyin.com/*
@@ -495,9 +495,14 @@
             return true;
         }
 
-        return /^(鎼滅储|鍙戦€亅璇勮|鐐硅禐|鏀惰棌|鍒嗕韩|娓呭睆|杩炴挱|鍊嶉€焲鍚姈闊硘鐐瑰嚮鎺ㄨ崘)$/.test(value);
+        return [
+            '\u70b9\u51fb\u63a8\u8350',
+            '\u53d1\u6765\u53cb\u597d\u7684\u5f39\u5e55\u5427',
+            '\u641c\u7d22',
+            '\u6e05\u5c4f',
+            '\u8fde\u64ad',
+        ].some((keyword) => value.includes(keyword));
     }
-
     function isBadProfileMetaText(text) {
         const value = normalizeText(text).toLowerCase();
         if (!value) {
@@ -510,17 +515,16 @@
             'select all',
             'clear all',
             'loading video list',
-            '通用配置',
-            '粉丝指数',
             'middleware',
             'perf',
             'snippet',
             'debug',
             'pc tab',
             'luckytrain',
+            '\u901a\u7528\u914d\u7f6e',
+            '\u7c89\u4e1d\u6307\u6570',
         ].some((keyword) => value.includes(keyword));
     }
-
     function isLikelyCountText(text) {
         const value = normalizeText(text);
         if (!value) {
@@ -1964,7 +1968,7 @@
         textCandidates.push(normalizeText(document.title));
 
         for (const text of textCandidates) {
-            const match = text.match(/(?:作品|发布)\s*(\d{1,5})/) || text.match(/(\d{1,5})\s*个?(?:作品|视频)/);
+            const match = text.match(/(?:\u4f5c\u54c1|\u53d1\u5e03)\s*(\d{1,5})/) || text.match(/(\d{1,5})\s*\u4e2a?(?:\u4f5c\u54c1|\u89c6\u9891)/);
             if (match) {
                 const count = Number(match[1]);
                 if (count > 0) {
