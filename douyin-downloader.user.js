@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Douyin Downloader
 // @namespace    https://github.com/W-ArcherEmiya
-// @version      1.7.15
+// @version      1.7.18
 // @description  下载当前抖音网页视频，并支持在个人主页批量选择视频下载。
 // @author       ArcherEmiya
 // @match        *://*.douyin.com/*
@@ -1723,7 +1723,13 @@
         }
 
         if (isBlobUrl && !directoryHandle) {
-            triggerDirectUrlDownload(videoUrl, filename);
+            const response = await fetch(videoUrl);
+            const blob = await response.blob();
+            if (!blob.size) {
+                throw new Error('Empty blob response');
+            }
+
+            triggerBrowserDownload(blob, filename);
             return;
         }
 
@@ -1871,6 +1877,23 @@
         }
 
         return `${location.origin}/video/${normalizedId}`;
+    }
+
+    function shouldPreferScopedPageResolution(href = location.href) {
+        try {
+            const url = new URL(href, location.href);
+            if (!url.searchParams.get('modal_id')) {
+                return false;
+            }
+
+            if (!/\/user\//.test(url.pathname)) {
+                return false;
+            }
+
+            return /\/search\//.test(url.pathname) || Boolean(url.searchParams.get('vid'));
+        } catch (error) {
+            return false;
+        }
     }
 
     // Profile-card metadata extraction.
@@ -2985,6 +3008,9 @@
         const video = findBestVideo();
         const locationVideoId = extractVideoId(location.href);
         const directVideoUrl = pickDirectVideoUrl(video);
+        const currentBlobUrl = typeof video?.currentSrc === 'string' && video.currentSrc.startsWith('blob:')
+            ? video.currentSrc
+            : '';
 
         const exactRecord = primeStructuredDataCacheFromDocument(document, locationVideoId);
         const cachedRecord = exactRecord || getStructuredVideoRecord(locationVideoId, directVideoUrl);
@@ -2994,6 +3020,23 @@
             baseMeta,
             cachedRecord?.meta || {}
         );
+
+        if (locationVideoId && shouldPreferScopedPageResolution(location.href)) {
+            try {
+                const resolved = await resolveVideoEntry(location.href);
+                return {
+                    videoUrl: resolved.videoUrl,
+                    meta: chooseBetterMeta(
+                        mergedMeta,
+                        resolved.meta || {}
+                    ),
+                    videoId: locationVideoId || resolved.videoId || extractVideoId(resolved.videoUrl),
+                    source: 'scoped-page',
+                };
+            } catch (error) {
+                console.warn('[Douyin Downloader] Scoped page resolution failed, falling back.', error);
+            }
+        }
 
         if (directVideoUrl || cachedRecord?.videoUrl) {
             return {
@@ -3014,6 +3057,15 @@
                 ),
                 videoId: locationVideoId || extractVideoId(currentDocumentEntry.videoUrl),
                 source: 'current-page',
+            };
+        }
+
+        if (currentBlobUrl) {
+            return {
+                videoUrl: currentBlobUrl,
+                meta: mergedMeta,
+                videoId: locationVideoId,
+                source: 'player-blob',
             };
         }
 
@@ -3151,7 +3203,9 @@
             }
 
             try {
-                const entry = await resolveVideoEntry(pageUrl);
+                const entry = await resolveVideoEntry(pageUrl, {
+                    allowUnknownVideoId: true,
+                });
                 entries.push({
                     id: `entry-${index}-${Date.now()}`,
                     pageUrl,
@@ -3212,7 +3266,9 @@
                 try {
                     let entry = selectedEntry;
                     if (!entry.videoUrl) {
-                        const resolvedEntry = await resolveVideoEntry(selectedEntry.pageUrl);
+                        const resolvedEntry = await resolveVideoEntry(selectedEntry.pageUrl, {
+                            allowUnknownVideoId: true,
+                        });
                         entry = {
                             ...selectedEntry,
                             videoUrl: resolvedEntry.videoUrl,
