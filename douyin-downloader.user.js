@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Douyin Downloader
 // @namespace    https://github.com/W-ArcherEmiya
-// @version      1.7.4
+// @version      1.7.15
 // @description  下载当前抖音网页视频，并支持在个人主页批量选择视频下载。
 // @author       ArcherEmiya
 // @match        *://*.douyin.com/*
@@ -635,6 +635,50 @@
             normalized.slice(0, AUTHOR_FILENAME_MAX_LENGTH),
             AUTHOR_FALLBACK
         );
+    }
+
+    function normalizeTitleForComparison(value) {
+        return normalizeText(value)
+            .replace(/第\s*\d+\s*集\s*[：:、.\-]?\s*/gi, '')
+            .replace(/\s*[#\uFF03][^\s#\uFF03]+/g, '')
+            .replace(/[@\s\u3000]/g, '')
+            .replace(/[\uFF0C\u3002\uFF01\uFF1F\uFF1B\uFF1A\u3001,.!?:;'"“”‘’()\[\]{}\-_/\\]/g, '')
+            .toLowerCase()
+            .trim();
+    }
+
+    function titlesLookRelated(left, right) {
+        const normalizedLeft = normalizeTitleForComparison(left);
+        const normalizedRight = normalizeTitleForComparison(right);
+
+        if (!normalizedLeft || !normalizedRight) {
+            return true;
+        }
+
+        if (normalizedLeft === normalizedRight) {
+            return true;
+        }
+
+        if (normalizedLeft.length >= 4 && normalizedRight.includes(normalizedLeft)) {
+            return true;
+        }
+
+        if (normalizedRight.length >= 4 && normalizedLeft.includes(normalizedRight)) {
+            return true;
+        }
+
+        return false;
+    }
+
+    function shouldRejectByTitleMismatch(requestedTitle, resolvedTitle) {
+        const requestedScore = scoreTitleCandidate(requestedTitle || '');
+        const resolvedScore = scoreTitleCandidate(resolvedTitle || '');
+
+        if (requestedScore < 8 || resolvedScore < 8) {
+            return false;
+        }
+
+        return !titlesLookRelated(requestedTitle, resolvedTitle);
     }
 
     function formatByteSize(bytes) {
@@ -1516,6 +1560,10 @@
         return typeof value === 'string' && /^https?:\/\//i.test(value);
     }
 
+    function isPlayableVideoUrl(value) {
+        return typeof value === 'string' && /^(https?:|blob:)/i.test(value);
+    }
+
     function getVideoCandidateUrls(video) {
         const candidates = [];
         const sourceElements = Array.from(video?.querySelectorAll?.('source') || []);
@@ -1561,6 +1609,16 @@
         window.setTimeout(() => {
             URL.revokeObjectURL(blobUrl);
         }, 1500);
+    }
+
+    function triggerDirectUrlDownload(url, filename) {
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = filename;
+        anchor.style.display = 'none';
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
     }
 
     async function saveBlobToDirectory(directoryHandle, filename, blob) {
@@ -1654,6 +1712,7 @@
 
     async function downloadVideoUrl(videoUrl, filename, onProgress, options = {}) {
         const directoryHandle = options.directoryHandle || null;
+        const isBlobUrl = typeof videoUrl === 'string' && videoUrl.startsWith('blob:');
 
         if (typeof onProgress === 'function') {
             onProgress({
@@ -1663,7 +1722,12 @@
             });
         }
 
-        if (!directoryHandle && typeof GM_download === 'function') {
+        if (isBlobUrl && !directoryHandle) {
+            triggerDirectUrlDownload(videoUrl, filename);
+            return;
+        }
+
+        if (!isBlobUrl && !directoryHandle && typeof GM_download === 'function') {
             try {
                 await gmDownload(videoUrl, filename, onProgress);
                 return;
@@ -1796,6 +1860,19 @@
         return '';
     }
 
+    function buildProfileVideoPageUrl(videoId) {
+        const normalizedId = normalizeVideoId(videoId);
+        if (!normalizedId) {
+            return '';
+        }
+
+        if (/\/user\//.test(location.pathname)) {
+            return `${location.origin}${location.pathname}?modal_id=${normalizedId}`;
+        }
+
+        return `${location.origin}/video/${normalizedId}`;
+    }
+
     // Profile-card metadata extraction.
     function getProfilePageAuthor() {
         const title = normalizeText(document.title)
@@ -1856,6 +1933,226 @@
         };
     }
 
+    function getProfileWorksCountHint() {
+        const textCandidates = Array.from(document.querySelectorAll('[role="tab"], button, [class*="tab"], [class*="Tab"]'))
+            .map((element) => readTextValue(element))
+            .filter(Boolean);
+
+        textCandidates.push(normalizeText(document.title));
+
+        for (const text of textCandidates) {
+            const match = text.match(/(?:作品|发布)\s*(\d{1,5})/) || text.match(/(\d{1,5})\s*个?(?:作品|视频)/);
+            if (match) {
+                const count = Number(match[1]);
+                if (count > 0) {
+                    return count;
+                }
+            }
+        }
+
+        return 0;
+    }
+
+    function getNormalizedProfileVideoAnchors(root = document) {
+        const entries = [];
+        const seen = new Set();
+        const candidates = Array.from(root.querySelectorAll('a[href*="/video/"], a[href*="modal_id="]'));
+
+        for (const anchor of candidates) {
+            const rawHref = anchor.getAttribute('href') || '';
+            const normalized = normalizeVideoPageUrl(rawHref);
+            const videoId = extractVideoId(rawHref) || extractVideoId(normalized);
+            if (!normalized || !videoId || seen.has(videoId)) {
+                continue;
+            }
+
+            seen.add(videoId);
+            entries.push({
+                anchor,
+                pageUrl: buildProfileVideoPageUrl(videoId),
+                videoId,
+            });
+        }
+
+        return entries;
+    }
+
+    function countUniqueProfileVideoAnchors(root) {
+        if (!root || typeof root.querySelectorAll !== 'function') {
+            return 0;
+        }
+
+        return getNormalizedProfileVideoAnchors(root).length;
+    }
+
+    function hasProfileCardMedia(element) {
+        if (!(element instanceof HTMLElement)) {
+            return false;
+        }
+
+        return Boolean(element.querySelector('img, picture, video, canvas, [style*="background-image"]'));
+    }
+
+    function findProfileVideoCard(anchor) {
+        if (!(anchor instanceof HTMLElement)) {
+            return null;
+        }
+
+        const semanticCard = anchor.closest('li, article');
+        if (semanticCard instanceof HTMLElement && countUniqueProfileVideoAnchors(semanticCard) === 1) {
+            return semanticCard;
+        }
+
+        let current = anchor;
+        let depth = 0;
+
+        while (current && current !== document.body && depth < 7) {
+            current = current.parentElement;
+            depth += 1;
+
+            if (!(current instanceof HTMLElement)) {
+                break;
+            }
+
+            const uniqueVideoCount = countUniqueProfileVideoAnchors(current);
+            if (uniqueVideoCount !== 1) {
+                continue;
+            }
+
+            const rect = current.getBoundingClientRect();
+            const looksLikeCard = hasProfileCardMedia(current) || rect.width > 140 || rect.height > 140;
+            if (looksLikeCard) {
+                return current;
+            }
+        }
+
+        return anchor.parentElement instanceof HTMLElement ? anchor.parentElement : anchor;
+    }
+
+    function countDirectProfileCards(root) {
+        if (!(root instanceof HTMLElement)) {
+            return 0;
+        }
+
+        let count = 0;
+        for (const child of Array.from(root.children)) {
+            if (!(child instanceof HTMLElement)) {
+                continue;
+            }
+
+            const uniqueVideoCount = countUniqueProfileVideoAnchors(child);
+            if (uniqueVideoCount === 1 && hasProfileCardMedia(child)) {
+                count += 1;
+            }
+        }
+
+        return count;
+    }
+
+    function scoreProfileVideoCollectionRoot(root, worksCountHint) {
+        const videoEntries = getNormalizedProfileVideoAnchors(root);
+        const uniqueVideoCount = videoEntries.length;
+        if (uniqueVideoCount < 3) {
+            return -Infinity;
+        }
+
+        const allLinkCount = root.querySelectorAll('a[href]').length || 1;
+        const densityScore = (uniqueVideoCount / allLinkCount) * 70;
+        const sizeScore = uniqueVideoCount * 8;
+        const directCardCount = countDirectProfileCards(root);
+        const directCardScore = directCardCount * 26;
+        const matchScore = worksCountHint
+            ? Math.max(0, 42 - (Math.abs(uniqueVideoCount - worksCountHint) * 12))
+            : 0;
+        const overshootPenalty = worksCountHint && uniqueVideoCount > worksCountHint
+            ? (uniqueVideoCount - worksCountHint) * 10
+            : 0;
+        const missingCardPenalty = uniqueVideoCount > 0 && directCardCount === 0 ? 60 : 0;
+
+        return sizeScore + densityScore + directCardScore + matchScore - overshootPenalty - missingCardPenalty;
+    }
+
+    function findProfileVideoCollectionRoot() {
+        const worksCountHint = getProfileWorksCountHint();
+        const anchors = getNormalizedProfileVideoAnchors(document);
+        if (anchors.length < 3) {
+            return {
+                root: document,
+                worksCountHint,
+            };
+        }
+
+        const candidateScores = new Map();
+
+        for (const entry of anchors) {
+            const card = findProfileVideoCard(entry.anchor);
+            if (!(card instanceof HTMLElement)) {
+                continue;
+            }
+
+            let current = card;
+            let depth = 0;
+
+            while (current && current !== document.body && depth < 6) {
+                current = current.parentElement;
+                depth += 1;
+
+                if (!(current instanceof HTMLElement)) {
+                    break;
+                }
+
+                if (!['DIV', 'SECTION', 'MAIN', 'UL', 'OL', 'ARTICLE'].includes(current.tagName)) {
+                    continue;
+                }
+
+                if (!candidateScores.has(current)) {
+                    candidateScores.set(current, scoreProfileVideoCollectionRoot(current, worksCountHint));
+                }
+            }
+        }
+
+        const bestEntry = Array.from(candidateScores.entries())
+            .filter(([, score]) => Number.isFinite(score))
+            .sort((left, right) => right[1] - left[1])[0];
+
+        return {
+            root: bestEntry?.[0] || document,
+            worksCountHint,
+        };
+    }
+
+    function getProfileVideoEntriesFromRoot(root, worksCountHint) {
+        const entries = [];
+        const seen = new Set();
+        const cards = new Set();
+        const candidates = getNormalizedProfileVideoAnchors(root);
+
+        for (const entry of candidates) {
+            const card = findProfileVideoCard(entry.anchor);
+            if (!(card instanceof HTMLElement) || cards.has(card) || seen.has(entry.pageUrl)) {
+                continue;
+            }
+
+            const cardRoot = card.parentElement instanceof HTMLElement ? card.parentElement : null;
+            if (cardRoot && cardRoot !== root && !root.contains(cardRoot)) {
+                continue;
+            }
+
+            cards.add(card);
+            seen.add(entry.pageUrl);
+            entries.push({
+                anchor: entry.anchor,
+                pageUrl: entry.pageUrl,
+            });
+
+            if (worksCountHint && entries.length >= worksCountHint) {
+                break;
+            }
+        }
+
+        return entries;
+    }
+
     function chooseBetterMeta(primaryMeta = {}, fallbackMeta = {}) {
         const primaryTitleScore = scoreTitleCandidate(primaryMeta.title || '');
         const fallbackTitleScore = scoreTitleCandidate(fallbackMeta.title || '');
@@ -1874,12 +2171,16 @@
 
     function collectProfileVideoLinks() {
         const links = new Set();
-        const candidates = Array.from(document.querySelectorAll('a[href*="/video/"], a[href*="modal_id="]'));
+        const { root, worksCountHint } = findProfileVideoCollectionRoot();
+        const candidates = getProfileVideoEntriesFromRoot(root, worksCountHint);
 
-        for (const anchor of candidates) {
-            const normalized = normalizeVideoPageUrl(anchor.getAttribute('href') || '');
-            if (normalized) {
-                links.add(normalized);
+        for (const entry of candidates) {
+            if (entry.pageUrl) {
+                links.add(entry.pageUrl);
+            }
+
+            if (worksCountHint && links.size >= worksCountHint) {
+                break;
             }
         }
 
@@ -1889,19 +2190,23 @@
     function collectProfileVideoEntries() {
         const entries = [];
         const seen = new Set();
-        const candidates = Array.from(document.querySelectorAll('a[href*="/video/"], a[href*="modal_id="]'));
+        const { root, worksCountHint } = findProfileVideoCollectionRoot();
+        const candidates = getProfileVideoEntriesFromRoot(root, worksCountHint);
 
-        for (const anchor of candidates) {
-            const normalized = normalizeVideoPageUrl(anchor.getAttribute('href') || '');
-            if (!normalized || seen.has(normalized)) {
+        for (const entry of candidates) {
+            if (!entry.pageUrl || seen.has(entry.pageUrl)) {
                 continue;
             }
 
-            seen.add(normalized);
+            seen.add(entry.pageUrl);
             entries.push({
-                pageUrl: normalized,
-                meta: extractMetaFromProfileCard(anchor),
+                pageUrl: entry.pageUrl,
+                meta: extractMetaFromProfileCard(entry.anchor),
             });
+
+            if (worksCountHint && entries.length >= worksCountHint) {
+                break;
+            }
         }
 
         return entries;
@@ -2562,6 +2867,11 @@
         const parser = new DOMParser();
         const doc = parser.parseFromString(htmlText, 'text/html');
         const meta = extractMetaFromDocument(doc);
+        const pageVideoId = normalizeVideoId(
+            doc.querySelector('link[rel="canonical"]')?.href ||
+            doc.querySelector('meta[property="og:url"]')?.content ||
+            ''
+        );
         const scripts = Array.from(doc.querySelectorAll('script'));
         const bucket = {
             videoUrls: [],
@@ -2589,6 +2899,7 @@
 
         return {
             videoUrl,
+            videoId: pageVideoId || extractVideoId(videoUrl),
             meta: {
                 title: sanitizeFilenamePart(title, TITLE_FALLBACK),
                 author: sanitizeFilenamePart(author, AUTHOR_FALLBACK),
@@ -2610,8 +2921,9 @@
         return entry;
     }
 
-    async function resolveVideoEntry(videoPageUrl) {
-        const targetVideoId = extractVideoId(videoPageUrl);
+    async function resolveVideoEntry(videoPageUrl, options = {}) {
+        const allowUnknownVideoId = Boolean(options.allowUnknownVideoId);
+        const targetVideoId = normalizeVideoId(extractVideoId(videoPageUrl));
         const cachedBeforeFetch = getStructuredVideoRecord(targetVideoId, '');
         if (cachedBeforeFetch?.videoUrl) {
             return cachedBeforeFetch;
@@ -2639,12 +2951,33 @@
         }
 
         const entry = extractVideoEntryFromHtml(htmlText);
+        const fallbackRecord = getStructuredVideoRecord('', entry.videoUrl);
+        const resolvedVideoId = normalizeVideoId(
+            entry.videoId ||
+            fallbackRecord?.videoId ||
+            extractVideoId(entry.videoUrl)
+        );
 
         if (!entry.videoUrl) {
             throw new Error('Could not find a playable video URL on the page');
         }
 
-        return entry;
+        if (targetVideoId && resolvedVideoId && resolvedVideoId !== targetVideoId) {
+            throw new Error('Could not match the requested video on the page');
+        }
+
+        if (targetVideoId && !resolvedVideoId && !allowUnknownVideoId) {
+            throw new Error('Could not match the requested video on the page');
+        }
+
+        return {
+            videoUrl: entry.videoUrl,
+            videoId: resolvedVideoId || (allowUnknownVideoId ? targetVideoId : ''),
+            meta: chooseBetterMeta(
+                entry.meta || {},
+                fallbackRecord?.meta || {}
+            ),
+        };
     }
 
     // Download entry resolution.
@@ -2808,8 +3141,9 @@
         for (let index = 0; index < links.length; index += 1) {
             const linkEntry = links[index];
             const pageUrl = typeof linkEntry === 'string' ? linkEntry : linkEntry.pageUrl;
+            const videoId = typeof linkEntry === 'string' ? extractVideoId(linkEntry) : (linkEntry.videoId || extractVideoId(linkEntry.pageUrl));
             const domMeta = typeof linkEntry === 'string' ? {} : (linkEntry.meta || {});
-            const progressMessage = `Resolving videos...\n${index + 1}/${links.length}\n${pageUrl}`;
+            const progressMessage = `Preparing batch list...\n${index + 1}/${links.length}\n${pageUrl}`;
             setPrimaryButtonState(`Scanning ${index + 1}/${links.length}`, true, 'batch');
             setStatus(progressMessage);
             if (state.batchModalLoading) {
@@ -2822,7 +3156,7 @@
                     id: `entry-${index}-${Date.now()}`,
                     pageUrl,
                     videoUrl: entry.videoUrl,
-                    videoId: extractVideoId(pageUrl) || extractVideoId(entry.videoUrl),
+                    videoId: videoId || extractVideoId(pageUrl) || extractVideoId(entry.videoUrl),
                     meta: chooseBetterMeta(domMeta, entry.meta),
                     available: Boolean(entry.videoUrl),
                     selected: Boolean(entry.videoUrl),
@@ -2834,14 +3168,14 @@
                     id: `entry-${index}-${Date.now()}`,
                     pageUrl,
                     videoUrl: '',
-                    videoId: extractVideoId(pageUrl),
+                    videoId: videoId || extractVideoId(pageUrl),
                     meta: chooseBetterMeta(domMeta, {
                         title: `Video ${index + 1}`,
                         author: AUTHOR_FALLBACK,
                     }),
-                    available: false,
-                    selected: false,
-                    error: error.message,
+                    available: Boolean(pageUrl),
+                    selected: Boolean(pageUrl),
+                    error: '',
                 });
             }
 
@@ -2871,11 +3205,23 @@
             const directoryHandle = await ensureWritableBatchDirectory();
 
             for (let index = 0; index < selectedEntries.length; index += 1) {
-                const entry = selectedEntries[index];
+                const selectedEntry = selectedEntries[index];
                 setPrimaryButtonState(`Batch ${index + 1}/${selectedEntries.length}`, true, 'batch');
-                setStatus(`Downloading ${index + 1}/${selectedEntries.length}...\n${entry.meta.title}`);
+                setStatus(`Preparing ${index + 1}/${selectedEntries.length}...\n${selectedEntry.meta.title}`);
 
                 try {
+                    let entry = selectedEntry;
+                    if (!entry.videoUrl) {
+                        const resolvedEntry = await resolveVideoEntry(selectedEntry.pageUrl);
+                        entry = {
+                            ...selectedEntry,
+                            videoUrl: resolvedEntry.videoUrl,
+                            videoId: selectedEntry.videoId || resolvedEntry.videoId || extractVideoId(resolvedEntry.videoUrl),
+                            meta: chooseBetterMeta(selectedEntry.meta, resolvedEntry.meta),
+                        };
+                    }
+
+                    setStatus(`Downloading ${index + 1}/${selectedEntries.length}...\n${entry.meta.title}`);
                     await downloadVideoUrl(
                         entry.videoUrl,
                         filenameMap.get(entry.id) || buildFilename(entry.meta),
@@ -2884,7 +3230,7 @@
                     );
                     successCount += 1;
                 } catch (error) {
-                    console.error('[Douyin Downloader] Selected batch item failed.', entry.pageUrl, error);
+                    console.error('[Douyin Downloader] Selected batch item failed.', selectedEntry.pageUrl, error);
                     setStatus(`Skipped ${index + 1}/${selectedEntries.length}:\n${error.message}`);
                 }
 
