@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         抖音视频下载（Douyin Downloader）
 // @namespace    https://github.com/W-ArcherEmiya
-// @version      1.7.19
+// @version      1.7.20
 // @description  下载当前抖音网页视频，并支持在个人主页批量选择视频下载。
 // @author       ArcherEmiya
 // @match        *://*.douyin.com/*
@@ -1894,7 +1894,7 @@
                 return false;
             }
 
-            return /\/search\//.test(url.pathname) || Boolean(url.searchParams.get('vid'));
+            return true;
         } catch (error) {
             return false;
         }
