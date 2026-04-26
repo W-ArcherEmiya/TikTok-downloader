@@ -17,10 +17,10 @@
 
 ### 1.7.48
 
-- Fixed recommendation feed downloads by reading the active page player through `unsafeWindow.player.curDefinition`.
-- Added alternate URL retry for player definitions and rejected tiny/error responses before saving files.
-- Fixed liked/favorite/history modal downloads by using the scoped active player before stale document/cache entries.
-- Kept profile batch download limited to actual profile work grids, so `user/self` feed tabs continue to behave as single-video pages.
+- 通过读取 `unsafeWindow.player.curDefinition` 中的活动页面播放器，修复了推荐源下载问题。
+- 为播放器定义添加了备用 URL 重试，并在保存文件之前拒绝微小/错误响应。
+- 通过在过期的文档/缓存条目之前使用作用域活动播放器来修复喜欢/收藏/历史记录模态下载的问题。
+- 将个人资料批量下载限制为实际的个人资料工作网格，因此 `user/self` 动态标签页继续作为单个视频页面运行。
 
 ### 1.7.25
 
