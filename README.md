@@ -13,17 +13,24 @@
 
 ## 最近更新
 
-当前版本：`1.7.20`
+当前版本：`1.7.48`
 
-### 1.7.20
+### 1.7.48
 
-- 用户主页弹层视频页统一优先按当前页面精确解析目标视频
-- 修复从关注页进入主页后，单视频下载可能标题正确但内容串台的问题
+- Fixed recommendation feed downloads by reading the active page player through `unsafeWindow.player.curDefinition`.
+- Added alternate URL retry for player definitions and rejected tiny/error responses before saving files.
+- Fixed liked/favorite/history modal downloads by using the scoped active player before stale document/cache entries.
+- Kept profile batch download limited to actual profile work grids, so `user/self` feed tabs continue to behave as single-video pages.
 
-### 1.7.19
+### 1.7.25
 
-- 同步脚本名称为“抖音视频下载（Douyin Downloader）”
-- 修复脚本中两处被编码污染导致的标题比较与作品数识别逻辑
+- 带 `modal_id` 的页面在单视频下载时，优先使用按目标视频 ID 命中的缓存记录
+- 减少喜欢、收藏、推荐和精选页面继续落到 demo 视频的问题
+
+### 1.7.24
+
+- 带 `modal_id` 的喜欢页、收藏页和个人页弹层，在无精确命中记录时优先使用当前文档解析结果
+- 修复部分 `user/self` 页面仍回退到服务端 demo 视频的问题
 
 ## 安装
 

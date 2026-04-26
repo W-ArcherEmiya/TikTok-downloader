@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.7.48
+
+- Fixed recommendation feed downloads by reading the active page player through `unsafeWindow.player.curDefinition`.
+- Added alternate URL retry for player definitions and rejected tiny/error responses before saving files.
+- Fixed liked/favorite/history modal downloads by using the scoped active player before stale document/cache entries.
+- Kept profile batch download limited to actual profile work grids, so `user/self` feed tabs continue to behave as single-video pages.
+
+## 1.7.25
+
+- 带 `modal_id` 的页面在单视频下载时，优先使用按目标视频 ID 命中的缓存记录
+- 减少喜欢、收藏、推荐和精选页面继续落到 demo 视频的问题
+
+## 1.7.24
+
+- 带 `modal_id` 的喜欢页、收藏页和个人页弹层，在无精确命中记录时优先使用当前文档解析结果
+- 修复部分 `user/self` 页面仍回退到服务端 demo 视频的问题
+
+## 1.7.23
+
+- 带 `modal_id` 的收藏页和个人页弹层，优先使用当前文档中精确命中的结构化视频记录
+- 修复部分收藏页视频下载时被服务端回包带偏到 demo 视频的问题
+
+## 1.7.22
+
+- 推荐页和无 `modal_id` 的精选页优先按当前页面结构化数据解析当前视频
+- 修复推荐流中标题正确但下载内容串到精选 demo 视频的问题
+
+## 1.7.21
+
+- 所有带 `modal_id` 的视频弹层页统一优先按当前页面精确解析目标视频
+- 修复 `jingxuan` 和观看历史入口中标题正确但下载内容串到精选 demo 视频的问题
+
 ## 1.7.20
 
 - 用户主页弹层视频页统一优先按当前页面精确解析目标视频
