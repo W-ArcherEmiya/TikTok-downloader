@@ -13,7 +13,12 @@
 
 ## 最近更新
 
-当前版本：`1.7.48`
+当前版本：`1.7.49`
+
+### 1.7.49
+
+- Prefer player downloadUrl/videoUrl/config.url candidates before DASH definition URLs to reduce video-only downloads without audio.
+- Keep DASH definition URLs as fallback when no merged MP4-style candidate is available.
 
 ### 1.7.48
 
