@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         抖音视频下载（Douyin Downloader）
 // @namespace    https://github.com/W-ArcherEmiya
-// @version      1.7.48
+// @version      1.7.49
 // @description  下载当前抖音网页视频，并支持在个人主页批量选择视频下载。
 // @author       ArcherEmiya
 // @match        *://*.douyin.com/*
@@ -1878,6 +1878,51 @@
         });
     }
 
+    function collectUrlListVideoUrlCandidates(value, bucket, label = 'player_url', bonus = 0) {
+        if (!value) {
+            return;
+        }
+
+        if (typeof value === 'string') {
+            pushDefinitionVideoUrlCandidate(bucket, label, value, bonus);
+            return;
+        }
+
+        if (!Array.isArray(value)) {
+            if (typeof value === 'object') {
+                pushDefinitionVideoUrlCandidate(bucket, `${label}_src`, value.src, bonus + 40);
+                pushDefinitionVideoUrlCandidate(bucket, `${label}_url`, value.url, bonus + 20);
+                pushDefinitionVideoUrlCandidate(bucket, `${label}_main_url`, value.main_url, bonus + 20);
+                pushDefinitionVideoUrlCandidate(bucket, `${label}_backup_url`, value.backup_url, bonus);
+            }
+            return;
+        }
+
+        value.forEach((item, index) => {
+            if (typeof item === 'string') {
+                pushDefinitionVideoUrlCandidate(bucket, `${label}_${index}`, item, bonus + 20);
+                return;
+            }
+
+            if (!item || typeof item !== 'object') {
+                return;
+            }
+
+            pushDefinitionVideoUrlCandidate(bucket, `${label}_${index}_src`, item.src, bonus + 60);
+            pushDefinitionVideoUrlCandidate(bucket, `${label}_${index}_url`, item.url, bonus + 40);
+            pushDefinitionVideoUrlCandidate(bucket, `${label}_${index}_main_url`, item.main_url, bonus + 30);
+            pushDefinitionVideoUrlCandidate(bucket, `${label}_${index}_backup_url`, item.backup_url, bonus + 10);
+        });
+    }
+
+    function safeReadProperty(object, key) {
+        try {
+            return object?.[key];
+        } catch (error) {
+            return null;
+        }
+    }
+
     function getPageWindow() {
         try {
             if (typeof unsafeWindow === 'object' && unsafeWindow) {
@@ -1963,18 +2008,29 @@
             return null;
         }
 
+        const config = safeReadProperty(playerObject, 'config') || {};
+        const curDefinition = safeReadProperty(playerObject, 'curDefinition');
+        const currentDefinition = safeReadProperty(playerObject, 'currentDefinition');
+        const videoConfig = safeReadProperty(playerObject, 'videoConfig');
+        const privateVideoConfig = safeReadProperty(playerObject, '_videoConfig');
+
         const videoId = [
-            playerObject.curDefinition?.id,
-            playerObject.currentDefinition?.id,
-            playerObject.config?.id,
-            playerObject.videoConfig?.id,
-            playerObject._videoConfig?.id,
+            curDefinition?.id,
+            currentDefinition?.id,
+            config?.id,
+            videoConfig?.id,
+            privateVideoConfig?.id,
         ].map(normalizeVideoId).find(Boolean) || '';
 
         const urlCandidates = [];
-        collectDefinitionVideoUrlCandidates(playerObject.curDefinition, urlCandidates, 220);
-        collectDefinitionVideoUrlCandidates(playerObject.currentDefinition, urlCandidates, 200);
-        collectDefinitionVideoUrlCandidates(playerObject.config?.definition, urlCandidates, 120);
+        collectUrlListVideoUrlCandidates(config?.downloadUrl, urlCandidates, 'config_downloadUrl', 420);
+        collectUrlListVideoUrlCandidates(config?.download_url, urlCandidates, 'config_download_url', 420);
+        collectUrlListVideoUrlCandidates(config?.videoUrl, urlCandidates, 'config_videoUrl', 360);
+        collectUrlListVideoUrlCandidates(config?.video_url, urlCandidates, 'config_video_url', 360);
+        collectUrlListVideoUrlCandidates(config?.url, urlCandidates, 'config_url', 320);
+        collectDefinitionVideoUrlCandidates(config?.definition, urlCandidates, 260);
+        collectDefinitionVideoUrlCandidates(curDefinition, urlCandidates, 160);
+        collectDefinitionVideoUrlCandidates(currentDefinition, urlCandidates, 150);
 
         const videoUrl = urlCandidates
             .sort((left, right) => right.score - left.score)
