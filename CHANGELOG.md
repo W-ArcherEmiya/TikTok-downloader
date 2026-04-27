@@ -2,8 +2,8 @@
 
 ## 1.7.49
 
-- Prefer player downloadUrl/videoUrl/config.url candidates before DASH definition URLs to reduce video-only downloads without audio.
-- Keep DASH definition URLs as fallback when no merged MP4-style candidate is available.
+- 优先使用播放器中的 `downloadUrl`、`videoUrl`、`config.url` 候选地址，减少下载到无声音 video-only 文件的情况。
+- 当没有可用的合并 MP4 候选地址时，保留 DASH definition 地址作为兜底。
 
 ## 1.7.48
 
