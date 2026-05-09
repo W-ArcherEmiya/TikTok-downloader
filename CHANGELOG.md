@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.7.50
+
+- 为 `recommend=1` 推荐页新增独立下载解析逻辑，只读取当前页面播放器 `unsafeWindow.player`，避免被 `nextPlayer` 或预加载资源串台。
+- 推荐页禁用 performance 预加载 URL 作为当前视频结果，改为当前播放器、独立视频页和详情接口的受控兜底顺序。
+
 ## 1.7.49
 
 - 优先使用播放器中的 `downloadUrl`、`videoUrl`、`config.url` 候选地址，减少下载到无声音 video-only 文件的情况。
