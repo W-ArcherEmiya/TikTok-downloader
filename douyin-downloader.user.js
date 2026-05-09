@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         抖音视频下载（Douyin Downloader）
 // @namespace    https://github.com/W-ArcherEmiya
-// @version      1.7.49
+// @version      1.7.50
 // @description  下载当前抖音网页视频，并支持在个人主页批量选择视频下载。
 // @author       ArcherEmiya
 // @match        *://*.douyin.com/*
@@ -1833,7 +1833,23 @@
         }
     }
 
-    function pushDefinitionVideoUrlCandidate(bucket, key, value, bonus = 0) {
+    function isDashOnlyDefinition(definition) {
+        if (!definition || typeof definition !== 'object') {
+            return false;
+        }
+
+        const text = [
+            definition.format,
+            definition.vtype,
+            definition.type,
+            definition.mediaType,
+            definition.media_type,
+        ].map((item) => String(item || '').toLowerCase()).join(' ');
+
+        return text.includes('dash') || Boolean(definition.audioDefinition || definition.audio_definition);
+    }
+
+    function pushDefinitionVideoUrlCandidate(bucket, key, value, bonus = 0, options = {}) {
         if (!looksLikeVideoUrl(key, value)) {
             return;
         }
@@ -1841,10 +1857,12 @@
         const loweredValue = value.toLowerCase();
         const isDirectVod = loweredValue.includes('douyinvod') || loweredValue.includes('video/tos');
         const isDashApi = /\/aweme\/v1\/play\/dash/i.test(loweredValue);
+        const dashOnly = Boolean(options.dashOnly || isDashApi);
 
         bucket.push({
             value,
-            score: scoreVideoUrl(key, value) + bonus + (isDirectVod ? 160 : 0) - (isDashApi ? 80 : 0),
+            dashOnly,
+            score: scoreVideoUrl(key, value) + bonus + (isDirectVod ? 160 : 0) - (dashOnly ? 520 : 0),
         });
     }
 
@@ -1853,17 +1871,21 @@
             return;
         }
 
-        pushDefinitionVideoUrlCandidate(bucket, 'definition_main_url', definition.main_url, bonus + 120);
-        pushDefinitionVideoUrlCandidate(bucket, 'definition_mainUrl', definition.mainUrl, bonus + 120);
-        pushDefinitionVideoUrlCandidate(bucket, 'definition_backup_url', definition.backup_url, bonus + 90);
-        pushDefinitionVideoUrlCandidate(bucket, 'definition_backupUrl', definition.backupUrl, bonus + 90);
-        pushDefinitionVideoUrlCandidate(bucket, 'definition_fallback_url', definition.fallback_url, bonus + 50);
-        pushDefinitionVideoUrlCandidate(bucket, 'definition_fallbackUrl', definition.fallbackUrl, bonus + 50);
+        const options = {
+            dashOnly: isDashOnlyDefinition(definition),
+        };
+
+        pushDefinitionVideoUrlCandidate(bucket, 'definition_main_url', definition.main_url, bonus + 120, options);
+        pushDefinitionVideoUrlCandidate(bucket, 'definition_mainUrl', definition.mainUrl, bonus + 120, options);
+        pushDefinitionVideoUrlCandidate(bucket, 'definition_backup_url', definition.backup_url, bonus + 90, options);
+        pushDefinitionVideoUrlCandidate(bucket, 'definition_backupUrl', definition.backupUrl, bonus + 90, options);
+        pushDefinitionVideoUrlCandidate(bucket, 'definition_fallback_url', definition.fallback_url, bonus + 50, options);
+        pushDefinitionVideoUrlCandidate(bucket, 'definition_fallbackUrl', definition.fallbackUrl, bonus + 50, options);
 
         const urls = Array.isArray(definition.url) ? definition.url : [];
         urls.forEach((item, index) => {
             if (typeof item === 'string') {
-                pushDefinitionVideoUrlCandidate(bucket, `definition_url_${index}`, item, bonus + 110);
+                pushDefinitionVideoUrlCandidate(bucket, `definition_url_${index}`, item, bonus + 110, options);
                 return;
             }
 
@@ -1871,10 +1893,14 @@
                 return;
             }
 
-            pushDefinitionVideoUrlCandidate(bucket, `definition_url_${index}_src`, item.src, bonus + 140);
-            pushDefinitionVideoUrlCandidate(bucket, `definition_url_${index}_main_url`, item.main_url, bonus + 125);
-            pushDefinitionVideoUrlCandidate(bucket, `definition_url_${index}_url`, item.url, bonus + 100);
-            pushDefinitionVideoUrlCandidate(bucket, `definition_url_${index}_backup_url`, item.backup_url, bonus + 90);
+            const itemOptions = {
+                dashOnly: options.dashOnly || isDashOnlyDefinition(item),
+            };
+
+            pushDefinitionVideoUrlCandidate(bucket, `definition_url_${index}_src`, item.src, bonus + 140, itemOptions);
+            pushDefinitionVideoUrlCandidate(bucket, `definition_url_${index}_main_url`, item.main_url, bonus + 125, itemOptions);
+            pushDefinitionVideoUrlCandidate(bucket, `definition_url_${index}_url`, item.url, bonus + 100, itemOptions);
+            pushDefinitionVideoUrlCandidate(bucket, `definition_url_${index}_backup_url`, item.backup_url, bonus + 90, itemOptions);
         });
     }
 
@@ -1890,10 +1916,13 @@
 
         if (!Array.isArray(value)) {
             if (typeof value === 'object') {
-                pushDefinitionVideoUrlCandidate(bucket, `${label}_src`, value.src, bonus + 40);
-                pushDefinitionVideoUrlCandidate(bucket, `${label}_url`, value.url, bonus + 20);
-                pushDefinitionVideoUrlCandidate(bucket, `${label}_main_url`, value.main_url, bonus + 20);
-                pushDefinitionVideoUrlCandidate(bucket, `${label}_backup_url`, value.backup_url, bonus);
+                const options = {
+                    dashOnly: isDashOnlyDefinition(value),
+                };
+                pushDefinitionVideoUrlCandidate(bucket, `${label}_src`, value.src, bonus + 40, options);
+                pushDefinitionVideoUrlCandidate(bucket, `${label}_url`, value.url, bonus + 20, options);
+                pushDefinitionVideoUrlCandidate(bucket, `${label}_main_url`, value.main_url, bonus + 20, options);
+                pushDefinitionVideoUrlCandidate(bucket, `${label}_backup_url`, value.backup_url, bonus, options);
             }
             return;
         }
@@ -1908,10 +1937,14 @@
                 return;
             }
 
-            pushDefinitionVideoUrlCandidate(bucket, `${label}_${index}_src`, item.src, bonus + 60);
-            pushDefinitionVideoUrlCandidate(bucket, `${label}_${index}_url`, item.url, bonus + 40);
-            pushDefinitionVideoUrlCandidate(bucket, `${label}_${index}_main_url`, item.main_url, bonus + 30);
-            pushDefinitionVideoUrlCandidate(bucket, `${label}_${index}_backup_url`, item.backup_url, bonus + 10);
+            const options = {
+                dashOnly: isDashOnlyDefinition(item),
+            };
+
+            pushDefinitionVideoUrlCandidate(bucket, `${label}_${index}_src`, item.src, bonus + 60, options);
+            pushDefinitionVideoUrlCandidate(bucket, `${label}_${index}_url`, item.url, bonus + 40, options);
+            pushDefinitionVideoUrlCandidate(bucket, `${label}_${index}_main_url`, item.main_url, bonus + 30, options);
+            pushDefinitionVideoUrlCandidate(bucket, `${label}_${index}_backup_url`, item.backup_url, bonus + 10, options);
         });
     }
 
@@ -1951,6 +1984,15 @@
                 return null;
             }
         }).filter((item) => item && typeof item === 'object');
+    }
+
+    function getPagePlayerObject(name = 'player') {
+        try {
+            const playerObject = getPageWindow()?.[name];
+            return playerObject && typeof playerObject === 'object' ? playerObject : null;
+        } catch (error) {
+            return null;
+        }
     }
 
     function scoreGlobalPlayer(playerObject, video) {
@@ -2032,12 +2074,12 @@
         collectDefinitionVideoUrlCandidates(curDefinition, urlCandidates, 160);
         collectDefinitionVideoUrlCandidates(currentDefinition, urlCandidates, 150);
 
-        const videoUrl = urlCandidates
-            .sort((left, right) => right.score - left.score)
-            .map((item) => item.value)[0] || '';
+        const sortedCandidates = urlCandidates
+            .sort((left, right) => right.score - left.score);
+        const selectedCandidate = sortedCandidates[0] || null;
+        const videoUrl = selectedCandidate?.value || '';
         const alternateUrls = Array.from(new Set(
-            urlCandidates
-                .sort((left, right) => right.score - left.score)
+            sortedCandidates
                 .map((item) => item.value)
                 .filter(Boolean)
         )).filter((url) => url !== videoUrl);
@@ -2050,6 +2092,7 @@
             videoId,
             videoUrl,
             alternateUrls,
+            dashOnly: Boolean(selectedCandidate?.dashOnly),
             meta: {},
         };
     }
@@ -2063,6 +2106,32 @@
             }))
             .filter((item) => item.entry && item.score > 0)
             .sort((left, right) => right.score - left.score)[0]?.entry || null;
+    }
+
+    function getRecommendPlayerEntry(video) {
+        const playerObject = getPagePlayerObject('player');
+        if (!playerObject) {
+            return null;
+        }
+
+        const entry = extractGlobalPlayerEntry(playerObject);
+        if (!entry?.videoUrl) {
+            return entry;
+        }
+
+        const score = scoreGlobalPlayer(playerObject, video);
+        const playerVideo = safeReadProperty(playerObject, 'video');
+        const sameVideo = video && playerVideo && playerVideo === video;
+        const clearlyCurrent = sameVideo ||
+            safeReadProperty(playerObject, 'isUserActive') === true ||
+            safeReadProperty(playerObject, 'isPlaying') === true ||
+            Number(safeReadProperty(playerObject, 'currentTime') ?? safeReadProperty(playerObject, '_currentTime')) > 0;
+
+        if (!clearlyCurrent && score <= 0) {
+            return null;
+        }
+
+        return entry;
     }
 
     function pickRecentPerformanceVideoUrl(options = {}) {
@@ -2539,6 +2608,15 @@
             }
 
             return false;
+        } catch (error) {
+            return false;
+        }
+    }
+
+    function isRecommendPage(href = location.href) {
+        try {
+            const url = new URL(href, location.href);
+            return /^\/$/.test(url.pathname) && url.searchParams.get('recommend') === '1';
         } catch (error) {
             return false;
         }
@@ -3867,10 +3945,82 @@
     }
 
     // Download entry resolution.
+    async function resolveRecommendVideoEntry(video) {
+        const baseMeta = video ? extractMetaFromVideo(video) : buildFallbackMeta();
+        const playerEntry = getRecommendPlayerEntry(video);
+        const activeVideoId = normalizeVideoId(playerEntry?.videoId) || (video ? findNearbyVideoId(video) : '');
+        const exactRecord = primeStructuredDataCacheFromDocument(document, activeVideoId);
+        const mergedMeta = chooseBetterMeta(
+            baseMeta,
+            exactRecord?.meta || {}
+        );
+
+        if (playerEntry?.videoUrl && !playerEntry.dashOnly) {
+            return {
+                videoUrl: playerEntry.videoUrl,
+                alternateUrls: playerEntry.alternateUrls || [],
+                meta: mergedMeta,
+                videoId: activeVideoId || playerEntry.videoId || extractVideoId(playerEntry.videoUrl),
+                source: 'recommend-player',
+            };
+        }
+
+        if (activeVideoId) {
+            const videoPageUrl = buildStandaloneVideoPageUrl(activeVideoId);
+            try {
+                const resolved = await resolveVideoEntry(videoPageUrl);
+                return {
+                    videoUrl: resolved.videoUrl,
+                    alternateUrls: resolved.alternateUrls || [],
+                    meta: chooseBetterMeta(
+                        mergedMeta,
+                        resolved.meta || {}
+                    ),
+                    videoId: activeVideoId || resolved.videoId || extractVideoId(resolved.videoUrl),
+                    source: 'recommend-video-page',
+                };
+            } catch (error) {
+                console.warn('[Douyin Downloader] Recommend video page resolution failed, falling back.', error);
+            }
+
+            try {
+                const resolved = await resolveVideoEntryFromAwemeDetail(activeVideoId);
+                return {
+                    videoUrl: resolved.videoUrl,
+                    alternateUrls: resolved.alternateUrls || [],
+                    meta: chooseBetterMeta(
+                        mergedMeta,
+                        resolved.meta || {}
+                    ),
+                    videoId: activeVideoId || resolved.videoId || extractVideoId(resolved.videoUrl),
+                    source: 'recommend-aweme-detail',
+                };
+            } catch (error) {
+                console.warn('[Douyin Downloader] Recommend aweme detail resolution failed.', error);
+            }
+        }
+
+        if (playerEntry?.videoUrl) {
+            return {
+                videoUrl: playerEntry.videoUrl,
+                alternateUrls: playerEntry.alternateUrls || [],
+                meta: mergedMeta,
+                videoId: activeVideoId || playerEntry.videoId || extractVideoId(playerEntry.videoUrl),
+                source: 'recommend-player-dash',
+            };
+        }
+
+        throw new Error('Could not resolve the current recommendation video from the active player');
+    }
+
     async function resolveCurrentVideoEntry() {
         noteLocationChange();
 
         const video = findBestVideo();
+        if (isRecommendPage(location.href)) {
+            return resolveRecommendVideoEntry(video);
+        }
+
         const locationVideoId = extractVideoId(location.href);
         const globalPlayerEntry = getCurrentGlobalPlayerEntry(video);
         const nearbyVideoId = video ? findNearbyVideoId(video) : '';
