@@ -4,7 +4,7 @@
 
 如果这个脚本对你有帮助，欢迎在 GitHub 点一个 Star。
 
-GitHub：https://github.com/W-ArcherEmiya/TikTok-downloader
+- GitHub: https://github.com/W-ArcherEmiya/TikTok-downloader.git
 
 ## 功能特性
 
