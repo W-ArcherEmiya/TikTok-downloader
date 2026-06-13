@@ -4,6 +4,8 @@
 
 如果这个脚本对你有帮助，欢迎在 GitHub 点一个 Star。
 
+GitHub：https://github.com/W-ArcherEmiya/TikTok-downloader
+
 ## 功能特性
 
 - 下载当前打开的抖音网页视频
