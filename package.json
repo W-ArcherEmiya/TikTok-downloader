@@ -1,0 +1,12 @@
+{
+  "name": "douyin-downloader-userscript",
+  "version": "1.8.0",
+  "private": true,
+  "scripts": {
+    "check": "node --check douyin-downloader.user.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "morphicons": "^1.7.1"
+  }
+}
