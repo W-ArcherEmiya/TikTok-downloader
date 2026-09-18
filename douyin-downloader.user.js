@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         抖音视频下载（Douyin Downloader）
 // @namespace    https://github.com/W-ArcherEmiya
-// @version      1.7.50
+// @version      1.8.0
 // @description  下载当前抖音网页视频，并支持在个人主页批量选择视频下载。
 // @author       ArcherEmiya
 // @match        *://*.douyin.com/*
@@ -10,6 +10,8 @@
 // @exclude      *://lf-zt.douyin.com/*
 // @grant        GM_addStyle
 // @grant        GM_download
+// @grant        GM_registerMenuCommand
+// @grant        GM_setClipboard
 // @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
 // @connect      *
@@ -17,14 +19,19 @@
 // @run-at       document-start
 // ==/UserScript==
 
+/* global module */
+
 (function () {
     'use strict';
 
     // Core identifiers and behavior tuning.
     const SCRIPT_ID = 'douyin-downloader';
+    const SCRIPT_VERSION = '1.8.0';
     const PANEL_ID = `${SCRIPT_ID}-panel`;
     const PANEL_TOGGLE_ID = `${SCRIPT_ID}-toggle`;
     const PANEL_STATUS_ID = `${SCRIPT_ID}-status`;
+    const LIQUID_GLASS_SVG_ID = `${SCRIPT_ID}-liquid-glass-svg`;
+    const LIQUID_GLASS_FILTER_ID = `${SCRIPT_ID}-liquid-glass-filter`;
     const BATCH_MODAL_ID = `${SCRIPT_ID}-batch-modal`;
     const BATCH_MODAL_LIST_ID = `${SCRIPT_ID}-batch-list`;
     const BATCH_MODAL_SUMMARY_ID = `${SCRIPT_ID}-batch-summary`;
@@ -41,16 +48,24 @@
     const MAX_NAME_LENGTH = 80;
     const TITLE_FILENAME_MAX_LENGTH = 28;
     const AUTHOR_FILENAME_MAX_LENGTH = 16;
-    const BATCH_DELAY_MS = 700;
+    const MIN_VIDEO_RESPONSE_BYTES = 1024;
+    const MAX_MP4_METADATA_BYTES = 16 * 1024 * 1024;
+    const MAX_MP4_BOX_SCAN_COUNT = 2048;
+    const MP4_RANGE_PROBE_BYTES = 2 * 1024 * 1024;
+    const MAX_RANGE_PROBE_RESPONSE_BYTES = MP4_RANGE_PROBE_BYTES + (64 * 1024);
+    const BATCH_DELAY_MS = 120;
+    const BATCH_ENTRY_RESOLVE_CONCURRENCY = 3;
     const SCAN_DELAY_MS = 900;
     const ACTION_STATUS_HIDE_DELAY_MS = 1500;
     const ACTION_REFRESH_DELAY_MS = 1700;
     const MAX_SCROLL_ROUNDS = 45;
     const MAX_STABLE_SCROLL_ROUNDS = 4;
     const MAX_UNDERCOUNT_STABLE_SCROLL_ROUNDS = 12;
+    const MAX_VIDEO_DATA_CACHE_SIZE = 240;
     const REFRESH_DEBOUNCE_MS = 180;
     const PANEL_POSITION_KEY = `${SCRIPT_ID}-panel-top`;
     const PANEL_EDGE_OFFSET = 16;
+    const PANEL_RIGHT_OFFSET = 21;
     const PANEL_TOGGLE_SIZE = 46;
     const PANEL_DRAG_THRESHOLD = 6;
 
@@ -74,6 +89,7 @@
         statusHideTimer: null,
         networkHookInstalled: false,
         resourceHookInstalled: false,
+        diagnosticMenuInstalled: false,
         mediaUrlRecords: [],
         videoDataCache: new Map(),
         videoDataRecords: [],
@@ -117,7 +133,7 @@
     const style = `
         #${PANEL_ID} {
             position: fixed;
-            right: ${PANEL_EDGE_OFFSET}px;
+            right: ${PANEL_RIGHT_OFFSET}px;
             top: ${PANEL_EDGE_OFFSET}px;
             z-index: 2147483647;
             display: flex;
@@ -127,11 +143,13 @@
         }
 
         #${PANEL_TOGGLE_ID} {
+            position: relative;
             width: ${PANEL_TOGGLE_SIZE}px;
             height: ${PANEL_TOGGLE_SIZE}px;
             border: none;
             border-radius: 999px;
             padding: 0;
+            overflow: hidden;
             background: linear-gradient(135deg, #141414 0%, #303030 100%);
             color: #ffffff;
             box-shadow: 0 14px 30px rgba(0, 0, 0, 0.34);
@@ -142,12 +160,57 @@
             touch-action: none;
         }
 
-        #${PANEL_ID}[data-mode="single"] #${PANEL_TOGGLE_ID} {
-            background: linear-gradient(135deg, #ff4d6d 0%, #ff8a3d 100%);
+        #${PANEL_ID}[data-mode="single"] #${PANEL_TOGGLE_ID},
+        #${PANEL_ID}[data-mode="batch"] #${PANEL_TOGGLE_ID} {
+            border: 1px solid rgba(255, 255, 255, 0.24);
+            background:
+                radial-gradient(circle at 28% 18%, rgba(255, 255, 255, 0.48), rgba(255, 255, 255, 0.12) 34%, transparent 58%),
+                linear-gradient(145deg, rgba(255, 255, 255, 0.2), rgba(210, 226, 255, 0.08) 52%, rgba(255, 255, 255, 0.14));
+            box-shadow:
+                inset 0 1px 1px rgba(255, 255, 255, 0.5),
+                inset 1px 0 1px rgba(255, 255, 255, 0.2),
+                inset 0 -1px 2px rgba(32, 46, 72, 0.12),
+                inset -1px 0 1px rgba(117, 184, 255, 0.1),
+                0 9px 24px rgba(0, 0, 0, 0.22),
+                0 2px 6px rgba(0, 0, 0, 0.12);
+            -webkit-backdrop-filter: blur(14px) saturate(180%) brightness(1.06);
+            backdrop-filter: blur(14px) saturate(180%) brightness(1.06);
+            backdrop-filter: url("#${LIQUID_GLASS_FILTER_ID}") blur(0.35px) contrast(1.18) brightness(1.06) saturate(1.16);
+        }
+
+        #${PANEL_ID}[data-mode="single"] #${PANEL_TOGGLE_ID}::before,
+        #${PANEL_ID}[data-mode="batch"] #${PANEL_TOGGLE_ID}::before {
+            content: "";
+            position: absolute;
+            inset: 2px;
+            border-radius: inherit;
+            background:
+                radial-gradient(ellipse at 34% 12%, rgba(255, 255, 255, 0.82), transparent 36%),
+                linear-gradient(120deg, rgba(255, 255, 255, 0.18), transparent 42%);
+            opacity: 0.74;
+            pointer-events: none;
+        }
+
+        #${PANEL_ID}[data-mode="single"] #${PANEL_TOGGLE_ID}::after,
+        #${PANEL_ID}[data-mode="batch"] #${PANEL_TOGGLE_ID}::after {
+            content: "";
+            position: absolute;
+            inset: 1px;
+            border-radius: inherit;
+            background:
+                linear-gradient(135deg, transparent 48%, rgba(113, 201, 255, 0.16) 72%, rgba(255, 142, 188, 0.14) 100%);
+            box-shadow:
+                inset 0 0 7px rgba(255, 255, 255, 0.1),
+                inset 0 -2px 5px rgba(82, 142, 214, 0.06);
+            mix-blend-mode: screen;
+            opacity: 0.72;
+            pointer-events: none;
         }
 
         #${PANEL_ID}[data-mode="batch"] #${PANEL_TOGGLE_ID} {
-            background: linear-gradient(135deg, #1877f2 0%, #31c1ff 100%);
+            background:
+                radial-gradient(circle at 28% 18%, rgba(255, 255, 255, 0.52), rgba(186, 224, 255, 0.16) 34%, transparent 58%),
+                linear-gradient(145deg, rgba(24, 119, 242, 0.24), rgba(49, 193, 255, 0.1) 54%, rgba(255, 255, 255, 0.13));
         }
 
         #${PANEL_ID}[data-disabled="true"] #${PANEL_TOGGLE_ID} {
@@ -161,6 +224,17 @@
             box-shadow: 0 16px 34px rgba(0, 0, 0, 0.4);
         }
 
+        #${PANEL_ID}[data-mode="single"] #${PANEL_TOGGLE_ID}:hover,
+        #${PANEL_ID}[data-mode="batch"] #${PANEL_TOGGLE_ID}:hover {
+            box-shadow:
+                inset 0 1px 1px rgba(255, 255, 255, 0.62),
+                inset 1px 0 1px rgba(255, 255, 255, 0.24),
+                inset 0 -1px 2px rgba(32, 46, 72, 0.14),
+                inset -1px 0 1px rgba(117, 184, 255, 0.12),
+                0 13px 30px rgba(0, 0, 0, 0.28),
+                0 3px 8px rgba(0, 0, 0, 0.14);
+        }
+
         #${PANEL_TOGGLE_ID}:focus-visible {
             outline: 2px solid rgba(255, 255, 255, 0.78);
             outline-offset: 3px;
@@ -172,20 +246,23 @@
         }
 
         #${PANEL_TOGGLE_ID} svg {
+            position: relative;
+            z-index: 2;
             width: 19px;
             height: 19px;
             display: block;
             fill: none;
             stroke: currentColor;
-            stroke-width: 1.9;
+            stroke-width: 2;
             stroke-linecap: round;
             stroke-linejoin: round;
+            filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.32));
         }
 
         #${PANEL_STATUS_ID} {
             order: -1;
             min-width: 168px;
-            max-width: min(320px, calc(100vw - ${PANEL_TOGGLE_SIZE + PANEL_EDGE_OFFSET + 40}px));
+            max-width: min(320px, calc(100vw - ${PANEL_TOGGLE_SIZE + PANEL_RIGHT_OFFSET + 40}px));
             padding: 10px 12px;
             border-radius: 14px;
             background: rgba(16, 16, 18, 0.9);
@@ -455,6 +532,49 @@
         return new Promise((resolve) => {
             window.setTimeout(resolve, ms);
         });
+    }
+
+    function sanitizeDiagnosticUrl(value, options = {}) {
+        const rawValue = String(value || '').trim();
+        if (!rawValue) {
+            return '';
+        }
+
+        if (rawValue.startsWith('blob:')) {
+            return 'blob:[current-page]';
+        }
+
+        const baseHref = typeof location === 'object' && location?.href
+            ? location.href
+            : 'https://www.douyin.com/';
+
+        try {
+            const url = new URL(rawValue, baseHref);
+            if (!/^https?:$/i.test(url.protocol)) {
+                return `${url.protocol}[redacted]`;
+            }
+
+            const sanitized = new URL(`${url.origin}${url.pathname}`);
+            if (options.preservePageParams) {
+                const allowedParams = [
+                    'recommend',
+                    'modal_id',
+                    'showTab',
+                    'from_tab_name',
+                    'type',
+                ];
+                for (const name of allowedParams) {
+                    const paramValue = url.searchParams.get(name);
+                    if (paramValue) {
+                        sanitized.searchParams.set(name, paramValue);
+                    }
+                }
+            }
+
+            return sanitized.href;
+        } catch (error) {
+            return '[invalid-url]';
+        }
     }
 
     function normalizeText(value) {
@@ -1248,8 +1368,130 @@
         return state.mode !== 'idle';
     }
 
+    function smoothStep(min, max, value) {
+        const normalized = Math.max(0, Math.min(1, (value - min) / (max - min)));
+        return normalized * normalized * (3 - (2 * normalized));
+    }
+
+    // Native userscript adaptation inspired by childrentime/liquid-glass.
+    function createLiquidGlassDisplacementMap(size) {
+        const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+        const context = canvas.getContext('2d');
+        if (!context) {
+            return null;
+        }
+
+        const vectors = new Float32Array(size * size * 2);
+        let maxDisplacement = 0;
+        let vectorIndex = 0;
+
+        for (let y = 0; y < size; y += 1) {
+            for (let x = 0; x < size; x += 1) {
+                const normalizedX = ((x + 0.5) / size) - 0.5;
+                const normalizedY = ((y + 0.5) / size) - 0.5;
+                const radius = Math.hypot(normalizedX, normalizedY);
+                let offsetX = 0;
+                let offsetY = 0;
+
+                if (radius < 0.5) {
+                    const edgeStrength = smoothStep(0.24, 0.5, radius);
+                    const refractionScale = 1 - (edgeStrength * 0.19);
+                    offsetX = (normalizedX * refractionScale - normalizedX) * size;
+                    offsetY = (normalizedY * refractionScale - normalizedY) * size;
+                }
+
+                vectors[vectorIndex] = offsetX;
+                vectors[vectorIndex + 1] = offsetY;
+                vectorIndex += 2;
+                maxDisplacement = Math.max(maxDisplacement, Math.abs(offsetX), Math.abs(offsetY));
+            }
+        }
+
+        if (!maxDisplacement) {
+            return null;
+        }
+
+        const imageData = context.createImageData(size, size);
+        vectorIndex = 0;
+        for (let pixelIndex = 0; pixelIndex < imageData.data.length; pixelIndex += 4) {
+            const offsetX = vectors[vectorIndex];
+            const offsetY = vectors[vectorIndex + 1];
+            vectorIndex += 2;
+
+            imageData.data[pixelIndex] = Math.round(Math.max(0, Math.min(255, 127.5 + ((offsetX / maxDisplacement) * 127.5))));
+            imageData.data[pixelIndex + 1] = Math.round(Math.max(0, Math.min(255, 127.5 + ((offsetY / maxDisplacement) * 127.5))));
+            imageData.data[pixelIndex + 2] = 128;
+            imageData.data[pixelIndex + 3] = 255;
+        }
+
+        context.putImageData(imageData, 0, 0);
+        return {
+            dataUrl: canvas.toDataURL('image/png'),
+            scale: maxDisplacement * 2,
+        };
+    }
+
+    function ensureLiquidGlassFilter() {
+        if (document.getElementById(LIQUID_GLASS_SVG_ID)) {
+            return;
+        }
+
+        try {
+            const displacementMap = createLiquidGlassDisplacementMap(PANEL_TOGGLE_SIZE);
+            if (!displacementMap) {
+                return;
+            }
+
+            const namespace = 'http://www.w3.org/2000/svg';
+            const svg = document.createElementNS(namespace, 'svg');
+            svg.id = LIQUID_GLASS_SVG_ID;
+            svg.setAttribute('width', '0');
+            svg.setAttribute('height', '0');
+            svg.setAttribute('aria-hidden', 'true');
+            svg.style.position = 'fixed';
+            svg.style.width = '0';
+            svg.style.height = '0';
+            svg.style.pointerEvents = 'none';
+
+            const defs = document.createElementNS(namespace, 'defs');
+            const filter = document.createElementNS(namespace, 'filter');
+            filter.id = LIQUID_GLASS_FILTER_ID;
+            filter.setAttribute('filterUnits', 'userSpaceOnUse');
+            filter.setAttribute('color-interpolation-filters', 'sRGB');
+            filter.setAttribute('x', '0');
+            filter.setAttribute('y', '0');
+            filter.setAttribute('width', String(PANEL_TOGGLE_SIZE));
+            filter.setAttribute('height', String(PANEL_TOGGLE_SIZE));
+
+            const image = document.createElementNS(namespace, 'feImage');
+            image.setAttribute('href', displacementMap.dataUrl);
+            image.setAttributeNS('http://www.w3.org/1999/xlink', 'href', displacementMap.dataUrl);
+            image.setAttribute('width', String(PANEL_TOGGLE_SIZE));
+            image.setAttribute('height', String(PANEL_TOGGLE_SIZE));
+            image.setAttribute('preserveAspectRatio', 'none');
+            image.setAttribute('result', 'liquid-glass-map');
+
+            const displacement = document.createElementNS(namespace, 'feDisplacementMap');
+            displacement.setAttribute('in', 'SourceGraphic');
+            displacement.setAttribute('in2', 'liquid-glass-map');
+            displacement.setAttribute('scale', displacementMap.scale.toFixed(2));
+            displacement.setAttribute('xChannelSelector', 'R');
+            displacement.setAttribute('yChannelSelector', 'G');
+
+            filter.appendChild(image);
+            filter.appendChild(displacement);
+            defs.appendChild(filter);
+            svg.appendChild(defs);
+            document.body.appendChild(svg);
+        } catch (error) {
+            console.warn('[Douyin Downloader] Liquid glass filter initialization failed.', error);
+        }
+    }
+
     function getToggleIconMarkup() {
-        return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v10"></path><path d="M8.5 11.5 12 15l3.5-3.5"></path><path d="M6 18h12"></path></svg>';
+        return '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="size-6" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3"></path></svg>';
     }
 
     function clampPanelTop(value) {
@@ -2263,13 +2505,342 @@
             throw new Error('Empty video response');
         }
 
-        if (size < 1024) {
+        if (size < MIN_VIDEO_RESPONSE_BYTES) {
             throw new Error(`Video response is too small (${size} bytes)`);
         }
 
         if (/^(text\/|application\/(?:json|xml)|.*html|.*xml)/i.test(contentType)) {
             throw new Error(`Video response has unexpected content type: ${contentType || 'unknown'}`);
         }
+    }
+
+    function readAsciiBytes(bytes, offset, length) {
+        if (!bytes || offset < 0 || offset + length > bytes.length) {
+            return '';
+        }
+
+        let value = '';
+        for (let index = 0; index < length; index += 1) {
+            value += String.fromCharCode(bytes[offset + index]);
+        }
+        return value;
+    }
+
+    function readIsoBmffBoxHeader(bytes, offset = 0, end = bytes?.length || 0, zeroSize = end - offset) {
+        if (!bytes || offset < 0 || offset + 8 > end) {
+            return null;
+        }
+
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const size32 = view.getUint32(offset);
+        const type = readAsciiBytes(bytes, offset + 4, 4);
+        let size = size32;
+        let headerSize = 8;
+
+        if (size32 === 1) {
+            if (offset + 16 > end) {
+                return null;
+            }
+
+            const high = view.getUint32(offset + 8);
+            const low = view.getUint32(offset + 12);
+            size = (high * 0x100000000) + low;
+            headerSize = 16;
+            if (!Number.isSafeInteger(size)) {
+                return null;
+            }
+        } else if (size32 === 0) {
+            size = zeroSize;
+        }
+
+        if (!type || size < headerSize) {
+            return null;
+        }
+
+        return {
+            type,
+            size,
+            headerSize,
+            contentOffset: offset + headerSize,
+        };
+    }
+
+    function inspectIsoBmffBytes(value) {
+        const bytes = value instanceof Uint8Array ? value : new Uint8Array(value || 0);
+        const handlers = new Set();
+        const containerTypes = new Set(['moov', 'trak', 'mdia', 'minf', 'stbl', 'edts', 'udta', 'meta', 'moof', 'traf']);
+        let scannedBoxes = 0;
+
+        const walk = (start, end, depth = 0) => {
+            if (depth > 12 || start < 0 || end > bytes.length || start >= end) {
+                return;
+            }
+
+            let offset = start;
+            while (offset + 8 <= end && scannedBoxes < MAX_MP4_BOX_SCAN_COUNT) {
+                const header = readIsoBmffBoxHeader(bytes, offset, end);
+                if (!header || offset + header.size > end) {
+                    return;
+                }
+
+                scannedBoxes += 1;
+                const contentEnd = offset + header.size;
+                if (header.type === 'hdlr' && header.contentOffset + 12 <= contentEnd) {
+                    const handlerType = readAsciiBytes(bytes, header.contentOffset + 8, 4);
+                    if (handlerType) {
+                        handlers.add(handlerType);
+                    }
+                }
+
+                if (containerTypes.has(header.type)) {
+                    const childOffset = header.contentOffset + (header.type === 'meta' ? 4 : 0);
+                    walk(childOffset, contentEnd, depth + 1);
+                }
+
+                offset = contentEnd;
+            }
+        };
+
+        walk(0, bytes.length);
+        return {
+            container: 'mp4',
+            audio: handlers.has('soun'),
+            video: handlers.has('vide'),
+            conclusive: handlers.has('soun') || handlers.has('vide'),
+            handlers: Array.from(handlers).sort(),
+        };
+    }
+
+    function inspectIsoBmffRangeBytes(value) {
+        const bytes = value instanceof Uint8Array ? value : new Uint8Array(value || 0);
+        const directResult = inspectIsoBmffBytes(bytes);
+        if (directResult.conclusive) {
+            return directResult;
+        }
+
+        for (let typeOffset = 4; typeOffset + 4 <= bytes.length; typeOffset += 1) {
+            if (bytes[typeOffset] !== 0x6d
+                || bytes[typeOffset + 1] !== 0x6f
+                || bytes[typeOffset + 2] !== 0x6f
+                || bytes[typeOffset + 3] !== 0x76) {
+                continue;
+            }
+
+            const boxOffset = typeOffset - 4;
+            const header = readIsoBmffBoxHeader(bytes, boxOffset, bytes.length);
+            if (!header
+                || header.type !== 'moov'
+                || header.size > MAX_MP4_METADATA_BYTES
+                || boxOffset + header.size > bytes.length) {
+                continue;
+            }
+
+            const result = inspectIsoBmffBytes(bytes.subarray(boxOffset, boxOffset + header.size));
+            if (result.conclusive) {
+                return result;
+            }
+        }
+
+        return directResult;
+    }
+
+    function gmFetchRangeBytes(url, rangeHeader) {
+        if (typeof GM_xmlhttpRequest !== 'function') {
+            return Promise.reject(new Error('GM_xmlhttpRequest is unavailable'));
+        }
+
+        return new Promise((resolve, reject) => {
+            let requestHandle = null;
+            let settled = false;
+            const rejectOnce = (error) => {
+                if (settled) {
+                    return;
+                }
+                settled = true;
+                reject(error);
+            };
+
+            requestHandle = GM_xmlhttpRequest({
+                method: 'GET',
+                url,
+                headers: {
+                    Range: rangeHeader,
+                    Accept: 'video/mp4,video/*;q=0.9,*/*;q=0.1',
+                },
+                responseType: 'arraybuffer',
+                timeout: 30000,
+                onprogress: (event) => {
+                    const loaded = Number(event?.loaded) || 0;
+                    if (loaded <= MAX_RANGE_PROBE_RESPONSE_BYTES) {
+                        return;
+                    }
+
+                    try {
+                        requestHandle?.abort?.();
+                    } catch (error) {
+                        // Reject below even when the userscript manager cannot abort the request.
+                    }
+                    rejectOnce(new Error('Server ignored the MP4 metadata range request'));
+                },
+                onload: async (response) => {
+                    if (settled) {
+                        return;
+                    }
+
+                    const status = Number(response?.status) || 0;
+                    if (status && (status < 200 || status >= 300)) {
+                        rejectOnce(new Error(`MP4 metadata request failed with HTTP ${status}`));
+                        return;
+                    }
+
+                    try {
+                        const responseValue = response?.response;
+                        let bytes;
+                        if (responseValue instanceof ArrayBuffer) {
+                            bytes = new Uint8Array(responseValue);
+                        } else if (ArrayBuffer.isView(responseValue)) {
+                            bytes = new Uint8Array(
+                                responseValue.buffer,
+                                responseValue.byteOffset,
+                                responseValue.byteLength
+                            );
+                        } else if (responseValue instanceof Blob) {
+                            bytes = new Uint8Array(await responseValue.arrayBuffer());
+                        } else {
+                            throw new Error('MP4 metadata request returned an unsupported response');
+                        }
+
+                        if (!bytes.length || bytes.length > MAX_RANGE_PROBE_RESPONSE_BYTES) {
+                            throw new Error('MP4 metadata response had an unexpected size');
+                        }
+
+                        settled = true;
+                        resolve(bytes);
+                    } catch (error) {
+                        rejectOnce(error);
+                    }
+                },
+                onerror: (error) => {
+                    rejectOnce(new Error(error?.error || 'MP4 metadata request failed'));
+                },
+                ontimeout: () => {
+                    rejectOnce(new Error('MP4 metadata request timeout'));
+                },
+            });
+        });
+    }
+
+    async function inspectRemoteIsoBmffTracks(url) {
+        const ranges = [
+            `bytes=0-${MP4_RANGE_PROBE_BYTES - 1}`,
+            `bytes=-${MP4_RANGE_PROBE_BYTES}`,
+        ];
+
+        for (const rangeHeader of ranges) {
+            try {
+                const bytes = await gmFetchRangeBytes(url, rangeHeader);
+                const mediaInfo = inspectIsoBmffRangeBytes(bytes);
+                if (mediaInfo.conclusive) {
+                    return mediaInfo;
+                }
+            } catch (error) {
+                console.warn('[Douyin Downloader] MP4 metadata probe failed.', rangeHeader, error);
+            }
+        }
+
+        return {
+            container: 'unknown',
+            audio: false,
+            video: false,
+            conclusive: false,
+            handlers: [],
+        };
+    }
+
+    async function inspectIsoBmffBlob(blob) {
+        if (!(blob instanceof Blob) || blob.size < 8) {
+            return {
+                container: 'unknown',
+                audio: false,
+                video: false,
+                conclusive: false,
+                handlers: [],
+            };
+        }
+
+        let offset = 0;
+        let scannedBoxes = 0;
+        let sawIsoBmffMarker = false;
+
+        while (offset + 8 <= blob.size && scannedBoxes < MAX_MP4_BOX_SCAN_COUNT) {
+            const headerBytes = new Uint8Array(await blob.slice(offset, Math.min(blob.size, offset + 16)).arrayBuffer());
+            const header = readIsoBmffBoxHeader(headerBytes, 0, headerBytes.length, blob.size - offset);
+            if (!header || offset + header.size > blob.size) {
+                break;
+            }
+
+            scannedBoxes += 1;
+            if (header.type === 'ftyp' || header.type === 'styp' || header.type === 'moov') {
+                sawIsoBmffMarker = true;
+            }
+
+            if (header.type === 'moov') {
+                if (header.size > MAX_MP4_METADATA_BYTES) {
+                    return {
+                        container: 'mp4',
+                        audio: false,
+                        video: false,
+                        conclusive: false,
+                        handlers: [],
+                    };
+                }
+
+                const moovBytes = new Uint8Array(await blob.slice(offset, offset + header.size).arrayBuffer());
+                return inspectIsoBmffBytes(moovBytes);
+            }
+
+            offset += header.size;
+        }
+
+        return {
+            container: sawIsoBmffMarker ? 'mp4' : 'unknown',
+            audio: false,
+            video: false,
+            conclusive: false,
+            handlers: [],
+        };
+    }
+
+    function validateMediaTrackInfo(mediaInfo, options = {}) {
+        if (options.rejectVideoOnly && mediaInfo.conclusive && mediaInfo.video && !mediaInfo.audio) {
+            const error = new Error('MP4 candidate contains a video track but no audio track');
+            error.code = 'VIDEO_ONLY_MEDIA';
+            error.mediaInfo = mediaInfo;
+            throw error;
+        }
+
+        return mediaInfo;
+    }
+
+    async function validateBlobMediaTracks(blob, options = {}) {
+        let mediaInfo;
+        try {
+            mediaInfo = await inspectIsoBmffBlob(blob);
+        } catch (error) {
+            return {
+                container: 'unknown',
+                audio: false,
+                video: false,
+                conclusive: false,
+                handlers: [],
+            };
+        }
+
+        return validateMediaTrackInfo(mediaInfo, options);
+    }
+
+    function isMediaValidationError(error) {
+        return error?.code === 'VIDEO_ONLY_MEDIA';
     }
 
     async function saveBlobToDirectory(directoryHandle, filename, blob) {
@@ -2291,27 +2862,56 @@
         }
 
         return new Promise((resolve, reject) => {
-            GM_download({
+            let downloadHandle = null;
+            let settled = false;
+            const resolveOnce = (value) => {
+                if (settled) {
+                    return;
+                }
+                settled = true;
+                resolve(value);
+            };
+            const rejectOnce = (error) => {
+                if (settled) {
+                    return;
+                }
+                settled = true;
+                reject(error);
+            };
+
+            downloadHandle = GM_download({
                 url,
                 name: filename,
                 saveAs: false,
-                onload: resolve,
+                onload: resolveOnce,
                 onprogress: (event) => {
+                    const loaded = Number(event?.loaded) || 0;
+                    const total = Number(event?.total) || 0;
+                    if (total > 0 && total < MIN_VIDEO_RESPONSE_BYTES) {
+                        try {
+                            downloadHandle?.abort?.();
+                        } catch (error) {
+                            // Reject below even when the userscript manager cannot abort the transfer.
+                        }
+                        rejectOnce(new Error(`Video response is too small (${total} bytes)`));
+                        return;
+                    }
+
                     if (typeof onProgress !== 'function') {
                         return;
                     }
 
                     onProgress({
                         phase: 'downloading',
-                        loaded: Number(event?.loaded) || 0,
-                        total: Number(event?.total) || 0,
+                        loaded,
+                        total,
                     });
                 },
                 onerror: (error) => {
-                    reject(new Error(error?.error || 'GM_download failed'));
+                    rejectOnce(new Error(error?.error || 'GM_download failed'));
                 },
                 ontimeout: () => {
-                    reject(new Error('GM_download timeout'));
+                    rejectOnce(new Error('GM_download timeout'));
                 },
             });
         });
@@ -2388,18 +2988,48 @@
         if (isBlobUrl && !directoryHandle) {
             const response = await fetch(videoUrl);
             const blob = await response.blob();
-            if (!blob.size) {
-                throw new Error('Empty blob response');
-            }
+            assertUsableVideoBlob(blob, {
+                contentType: response.headers.get('content-type') || blob.type,
+                status: response.status,
+            });
+            const mediaInfo = await validateBlobMediaTracks(blob, options);
 
             triggerBrowserDownload(blob, filename);
-            return;
+            return { mediaInfo };
         }
 
-        if (!isBlobUrl && !directoryHandle && typeof GM_download === 'function') {
+        let probedMediaInfo = null;
+        if (!isBlobUrl && options.inspectMediaTracks) {
+            probedMediaInfo = await inspectRemoteIsoBmffTracks(videoUrl);
+            if (probedMediaInfo.conclusive) {
+                validateMediaTrackInfo(probedMediaInfo, options);
+
+                if (!directoryHandle && typeof GM_download === 'function') {
+                    try {
+                        await gmDownload(videoUrl, filename, onProgress);
+                        return { mediaInfo: probedMediaInfo };
+                    } catch (error) {
+                        console.warn('[Douyin Downloader] Native download failed after MP4 metadata validation.', error);
+                    }
+                }
+            }
+        }
+
+        if (!isBlobUrl
+            && directoryHandle
+            && (!options.inspectMediaTracks || probedMediaInfo?.conclusive)) {
+            try {
+                await fetchVideoToDirectory(videoUrl, directoryHandle, filename, onProgress);
+                return { mediaInfo: probedMediaInfo };
+            } catch (error) {
+                console.warn('[Douyin Downloader] Streaming directory download failed, falling back to buffered download.', error);
+            }
+        }
+
+        if (!isBlobUrl && !directoryHandle && !options.rejectVideoOnly && !options.inspectMediaTracks && typeof GM_download === 'function') {
             try {
                 await gmDownload(videoUrl, filename, onProgress);
-                return;
+                return { mediaInfo: null };
             } catch (error) {
                 console.warn('[Douyin Downloader] GM_download failed, falling back to GM_xmlhttpRequest.', error);
             }
@@ -2408,9 +3038,13 @@
         if (!isBlobUrl && !directoryHandle) {
             try {
                 const result = await gmFetchBlob(videoUrl, onProgress);
+                const mediaInfo = await validateBlobMediaTracks(result.blob, options);
                 triggerBrowserDownload(result.blob, filename);
-                return;
+                return { mediaInfo };
             } catch (error) {
+                if (isMediaValidationError(error)) {
+                    throw error;
+                }
                 console.warn('[Douyin Downloader] GM_xmlhttpRequest download failed, falling back to fetch.', error);
             }
         }
@@ -2426,9 +3060,13 @@
 
             try {
                 const result = await gmFetchBlob(videoUrl, onProgress);
+                const mediaInfo = await validateBlobMediaTracks(result.blob, options);
                 await saveBlobToDirectory(directoryHandle, filename, result.blob);
-                return;
+                return { mediaInfo };
             } catch (error) {
+                if (isMediaValidationError(error)) {
+                    throw error;
+                }
                 console.warn('[Douyin Downloader] Directory download via GM_xmlhttpRequest failed, falling back to fetch.', error);
             }
         }
@@ -2461,13 +3099,14 @@
                     contentType: response.headers.get('content-type') || blob.type,
                     status: response.status,
                 });
+                const mediaInfo = await validateBlobMediaTracks(blob, options);
 
                 if (directoryHandle) {
                     await saveBlobToDirectory(directoryHandle, filename, blob);
                 } else {
                     triggerBrowserDownload(blob, filename);
                 }
-                return;
+                return { mediaInfo };
             }
 
             const reader = response.body.getReader();
@@ -2503,21 +3142,201 @@
                 contentType: response.headers.get('content-type') || blob.type,
                 status: response.status,
             });
+            const mediaInfo = await validateBlobMediaTracks(blob, options);
 
             if (directoryHandle) {
                 await saveBlobToDirectory(directoryHandle, filename, blob);
             } else {
                 triggerBrowserDownload(blob, filename);
             }
+            return { mediaInfo };
         } catch (error) {
-            if (directoryHandle && typeof GM_download === 'function') {
+            if (isMediaValidationError(error)) {
+                throw error;
+            }
+
+            if (directoryHandle && !options.rejectVideoOnly && typeof GM_download === 'function') {
                 console.warn('[Douyin Downloader] Directory download via fetch failed, falling back to browser download.', error);
                 await gmDownload(videoUrl, filename, onProgress);
-                return;
+                return { mediaInfo: null };
+            }
+
+            if (!directoryHandle
+                && !options.rejectVideoOnly
+                && options.inspectMediaTracks
+                && typeof GM_download === 'function') {
+                console.warn('[Douyin Downloader] Media inspection failed, falling back to GM_download.', error);
+                await gmDownload(videoUrl, filename, onProgress);
+                return { mediaInfo: null };
             }
 
             throw error;
         }
+    }
+
+    async function fetchVideoToDirectory(videoUrl, directoryHandle, filename, onProgress) {
+        const response = await fetch(videoUrl, {
+            credentials: getFetchCredentialsForUrl(videoUrl),
+        });
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+
+        const total = Number(response.headers.get('content-length')) || 0;
+        const contentType = response.headers.get('content-type') || 'video/mp4';
+        if (total > 0) {
+            assertUsableVideoBlob({ size: total, type: contentType }, {
+                contentType,
+                status: response.status,
+            });
+        }
+
+        if (!response.body || typeof response.body.getReader !== 'function') {
+            const blob = await response.blob();
+            assertUsableVideoBlob(blob, {
+                contentType,
+                status: response.status,
+            });
+            if (typeof onProgress === 'function') {
+                onProgress({
+                    phase: 'downloading',
+                    loaded: blob.size,
+                    total: total || blob.size,
+                });
+            }
+            await saveBlobToDirectory(directoryHandle, filename, blob);
+            return;
+        }
+
+        const fileHandle = await directoryHandle.getFileHandle(filename, {
+            create: true,
+        });
+        const writable = await fileHandle.createWritable();
+        const reader = response.body.getReader();
+        let loaded = 0;
+
+        try {
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) {
+                    break;
+                }
+
+                if (!value) {
+                    continue;
+                }
+
+                await writable.write(value);
+                loaded += value.byteLength;
+                if (typeof onProgress === 'function') {
+                    onProgress({
+                        phase: 'downloading',
+                        loaded,
+                        total,
+                    });
+                }
+            }
+
+            assertUsableVideoBlob({ size: loaded, type: contentType }, {
+                contentType,
+                status: response.status,
+            });
+            await writable.close();
+        } catch (error) {
+            try {
+                await reader.cancel();
+            } catch (cancelError) {
+                // Continue cleanup even when the response stream cannot be cancelled.
+            }
+            try {
+                if (typeof writable.abort === 'function') {
+                    await writable.abort();
+                } else {
+                    await writable.close();
+                }
+            } catch (closeError) {
+                // Preserve the original transfer error.
+            }
+            throw error;
+        }
+    }
+
+    function getEntryCandidateUrls(entry, options = {}) {
+        const excludedUrls = new Set(
+            Array.isArray(options.excludeUrls)
+                ? options.excludeUrls.filter((value) => typeof value === 'string' && value)
+                : []
+        );
+        const candidates = [
+            entry?.videoUrl,
+            ...(Array.isArray(entry?.alternateUrls) ? entry.alternateUrls : []),
+        ];
+
+        return Array.from(new Set(candidates))
+            .filter(isPlayableVideoUrl)
+            .filter((url) => !excludedUrls.has(url));
+    }
+
+    async function downloadVideoEntry(entry, filename, onProgress, options = {}) {
+        const candidateUrls = getEntryCandidateUrls(entry, {
+            excludeUrls: options.excludeUrls,
+        });
+        if (!candidateUrls.length) {
+            throw new Error('No playable candidate video URLs were available');
+        }
+
+        const download = typeof options.download === 'function' ? options.download : downloadVideoUrl;
+        const onAttempt = typeof options.onAttempt === 'function' ? options.onAttempt : null;
+        const onFailure = typeof options.onFailure === 'function'
+            ? options.onFailure
+            : (failure) => console.warn('[Douyin Downloader] Candidate video URL failed.', failure.error);
+        const downloadOptions = options.downloadOptions || {};
+        const failures = [];
+
+        for (let index = 0; index < candidateUrls.length; index += 1) {
+            const videoUrl = candidateUrls[index];
+            if (onAttempt) {
+                onAttempt({
+                    videoUrl,
+                    index,
+                    total: candidateUrls.length,
+                });
+            }
+
+            try {
+                const candidateDownloadOptions = {
+                    ...downloadOptions,
+                    rejectVideoOnly: index < candidateUrls.length - 1,
+                    inspectMediaTracks: candidateUrls.length > 1,
+                };
+                const downloadResult = await download(videoUrl, filename, onProgress, candidateDownloadOptions);
+                return {
+                    videoUrl,
+                    index,
+                    total: candidateUrls.length,
+                    mediaInfo: downloadResult?.mediaInfo || null,
+                };
+            } catch (error) {
+                failures.push({
+                    videoUrl,
+                    error,
+                });
+                onFailure({
+                    videoUrl,
+                    error,
+                    index,
+                    total: candidateUrls.length,
+                });
+            }
+        }
+
+        const lastError = failures[failures.length - 1]?.error;
+        const error = new Error(
+            `All ${candidateUrls.length} candidate video URLs failed${lastError?.message ? `: ${lastError.message}` : ''}`
+        );
+        error.cause = lastError;
+        error.attemptedUrls = candidateUrls;
+        throw error;
     }
 
     function normalizeVideoPageUrl(href) {
@@ -2607,6 +3426,10 @@
                 return true;
             }
 
+            if (isFriendFeedPage(url.href)) {
+                return true;
+            }
+
             return false;
         } catch (error) {
             return false;
@@ -2617,6 +3440,15 @@
         try {
             const url = new URL(href, location.href);
             return /^\/$/.test(url.pathname) && url.searchParams.get('recommend') === '1';
+        } catch (error) {
+            return false;
+        }
+    }
+
+    function isFriendFeedPage(href = location.href) {
+        try {
+            const url = new URL(href, location.href);
+            return /^\/friend\/?$/i.test(url.pathname) && !url.searchParams.get('modal_id');
         } catch (error) {
             return false;
         }
@@ -2660,6 +3492,10 @@
             }
 
             if (/^\/jingxuan$/i.test(url.pathname)) {
+                return true;
+            }
+
+            if (isFriendFeedPage(url.href)) {
                 return true;
             }
 
@@ -3540,8 +4376,9 @@
         return Array.from(merged.values());
     }
 
-    function cacheStructuredVideoRecords(records) {
+    function cacheStructuredVideoRecords(records, options = {}) {
         const mergedRecords = mergeStructuredVideoRecords(records);
+        const replaceExisting = Boolean(options.replaceExisting);
 
         for (const record of mergedRecords) {
             const key = record.videoId || record.videoUrl;
@@ -3550,9 +4387,15 @@
             }
 
             const existing = state.videoDataCache.get(key);
-            if (!existing || scoreStructuredVideoRecord(record) > scoreStructuredVideoRecord(existing)) {
+            if (replaceExisting || !existing || scoreStructuredVideoRecord(record) > scoreStructuredVideoRecord(existing)) {
+                state.videoDataCache.delete(key);
                 state.videoDataCache.set(key, record);
             }
+        }
+
+        while (state.videoDataCache.size > MAX_VIDEO_DATA_CACHE_SIZE) {
+            const oldestKey = state.videoDataCache.keys().next().value;
+            state.videoDataCache.delete(oldestKey);
         }
 
         state.videoDataRecords = mergeStructuredVideoRecords([
@@ -3565,11 +4408,17 @@
         const normalizedId = normalizeVideoId(videoId);
 
         if (normalizedId && state.videoDataCache.has(normalizedId)) {
-            return state.videoDataCache.get(normalizedId);
+            const record = state.videoDataCache.get(normalizedId);
+            state.videoDataCache.delete(normalizedId);
+            state.videoDataCache.set(normalizedId, record);
+            return record;
         }
 
         if (videoUrl && state.videoDataCache.has(videoUrl)) {
-            return state.videoDataCache.get(videoUrl);
+            const record = state.videoDataCache.get(videoUrl);
+            state.videoDataCache.delete(videoUrl);
+            state.videoDataCache.set(videoUrl, record);
+            return record;
         }
 
         if (normalizedId) {
@@ -3587,6 +4436,10 @@
         }
 
         return null;
+    }
+
+    function getStructuredVideoCacheSize() {
+        return state.videoDataCache.size;
     }
 
     function getStructuredVideoRecordByMeta(meta = {}) {
@@ -3659,7 +4512,7 @@
         };
     }
 
-    function primeStructuredDataCacheFromDocument(doc, targetVideoId = '') {
+    function primeStructuredDataCacheFromDocument(doc, targetVideoId = '', options = {}) {
         const scripts = Array.from(doc.querySelectorAll('script'));
         const records = [];
         let exactRecord = null;
@@ -3678,7 +4531,7 @@
         }
 
         if (records.length) {
-            cacheStructuredVideoRecords(records);
+            cacheStructuredVideoRecords(records, options);
         }
 
         return exactRecord;
@@ -3781,9 +4634,15 @@
             .map((item) => item.value)[0] || '';
     }
 
-    function extractVideoEntryFromHtml(htmlText) {
-        const parser = new DOMParser();
-        const doc = parser.parseFromString(htmlText, 'text/html');
+    function extractVideoEntryFromDocument(doc) {
+        if (!doc || typeof doc.querySelector !== 'function') {
+            return {
+                videoUrl: '',
+                videoId: '',
+                meta: buildFallbackMeta(),
+            };
+        }
+
         const meta = extractMetaFromDocument(doc);
         const pageVideoId = normalizeVideoId(
             doc.querySelector('link[rel="canonical"]')?.href ||
@@ -3825,13 +4684,18 @@
         };
     }
 
+    function extractVideoEntryFromHtml(htmlText) {
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(htmlText, 'text/html');
+        return extractVideoEntryFromDocument(doc);
+    }
+
     function extractVideoEntryFromCurrentDocument() {
-        const currentHtml = document.documentElement?.outerHTML || '';
-        if (!currentHtml) {
+        if (!document.documentElement) {
             return null;
         }
 
-        const entry = extractVideoEntryFromHtml(currentHtml);
+        const entry = extractVideoEntryFromDocument(document);
         if (!entry.videoUrl) {
             return null;
         }
@@ -3841,8 +4705,9 @@
 
     async function resolveVideoEntry(videoPageUrl, options = {}) {
         const allowUnknownVideoId = Boolean(options.allowUnknownVideoId);
+        const forceRefresh = Boolean(options.forceRefresh);
         const targetVideoId = normalizeVideoId(extractVideoId(videoPageUrl));
-        const cachedBeforeFetch = getStructuredVideoRecord(targetVideoId, '');
+        const cachedBeforeFetch = forceRefresh ? null : getStructuredVideoRecord(targetVideoId, '');
         if (cachedBeforeFetch?.videoUrl) {
             return cachedBeforeFetch;
         }
@@ -3858,12 +4723,14 @@
         const htmlText = await response.text();
         const parser = new DOMParser();
         const doc = parser.parseFromString(htmlText, 'text/html');
-        const exactRecord = primeStructuredDataCacheFromDocument(doc, targetVideoId);
+        const exactRecord = primeStructuredDataCacheFromDocument(doc, targetVideoId, {
+            replaceExisting: forceRefresh,
+        });
         if (exactRecord?.videoUrl) {
             return exactRecord;
         }
 
-        const cachedAfterParse = getStructuredVideoRecord(targetVideoId, '');
+        const cachedAfterParse = forceRefresh ? null : getStructuredVideoRecord(targetVideoId, '');
         if (cachedAfterParse?.videoUrl) {
             return cachedAfterParse;
         }
@@ -4370,32 +5237,21 @@
 
             setPrimaryButtonState('Starting download', true, 'single');
             setStatus(`Starting download:\n${entry.meta.title}`);
-            const candidateUrls = Array.from(new Set([
-                entry.videoUrl,
-                ...(Array.isArray(entry.alternateUrls) ? entry.alternateUrls : []),
-            ].filter(Boolean)));
-            let lastDownloadError = null;
-
-            for (let index = 0; index < candidateUrls.length; index += 1) {
-                try {
+            const downloadResult = await downloadVideoEntry(entry, filename, updateSingleDownloadProgress, {
+                onAttempt: ({ index, total }) => {
                     if (index > 0) {
-                        setStatus(`Trying alternate video URL ${index + 1}/${candidateUrls.length}:\n${entry.meta.title}`);
+                        setStatus(`Trying alternate video URL ${index + 1}/${total}:\n${entry.meta.title}`);
                     }
+                },
+            });
 
-                    await downloadVideoUrl(candidateUrls[index], filename, updateSingleDownloadProgress);
-                    lastDownloadError = null;
-                    break;
-                } catch (error) {
-                    lastDownloadError = error;
-                    console.warn('[Douyin Downloader] Candidate video URL failed.', error);
-                }
+            if (downloadResult.mediaInfo?.conclusive
+                && downloadResult.mediaInfo.video
+                && !downloadResult.mediaInfo.audio) {
+                setStatus(`Saved (no audio track detected):\n${filename}`);
+            } else {
+                setStatus(`Saved:\n${filename}`);
             }
-
-            if (lastDownloadError) {
-                throw lastDownloadError;
-            }
-
-            setStatus(`Saved:\n${filename}`);
         } catch (error) {
             console.error('[Douyin Downloader] Download failed.', error);
             setStatus(`Download failed:\n${error.message}`);
@@ -4460,54 +5316,67 @@
     }
 
     async function buildBatchEntriesFromLinks(links) {
-        const entries = [];
+        const entries = new Array(links.length);
+        let nextIndex = 0;
+        let completedCount = 0;
 
-        for (let index = 0; index < links.length; index += 1) {
-            const linkEntry = links[index];
-            const pageUrl = typeof linkEntry === 'string' ? linkEntry : linkEntry.pageUrl;
-            const videoId = typeof linkEntry === 'string' ? extractVideoId(linkEntry) : (linkEntry.videoId || extractVideoId(linkEntry.pageUrl));
-            const domMeta = typeof linkEntry === 'string' ? {} : (linkEntry.meta || {});
-            const progressMessage = `Preparing batch list...\n${index + 1}/${links.length}\n${pageUrl}`;
-            setPrimaryButtonState(`Scanning ${index + 1}/${links.length}`, true, 'batch');
-            setStatus(progressMessage);
-            if (state.batchModalLoading) {
-                setBatchModalLoading(true, progressMessage);
+        const resolveNextEntry = async () => {
+            while (nextIndex < links.length) {
+                const index = nextIndex;
+                nextIndex += 1;
+
+                const linkEntry = links[index];
+                const pageUrl = typeof linkEntry === 'string' ? linkEntry : linkEntry.pageUrl;
+                const videoId = typeof linkEntry === 'string'
+                    ? extractVideoId(linkEntry)
+                    : (linkEntry.videoId || extractVideoId(linkEntry.pageUrl));
+                const domMeta = typeof linkEntry === 'string' ? {} : (linkEntry.meta || {});
+
+                try {
+                    const entry = await resolveVideoEntry(pageUrl, {
+                        allowUnknownVideoId: true,
+                    });
+                    entries[index] = {
+                        id: `entry-${index}-${Date.now()}`,
+                        pageUrl,
+                        videoUrl: entry.videoUrl,
+                        alternateUrls: Array.isArray(entry.alternateUrls) ? entry.alternateUrls : [],
+                        videoId: videoId || extractVideoId(pageUrl) || extractVideoId(entry.videoUrl),
+                        meta: chooseBetterMeta(domMeta, entry.meta),
+                        available: Boolean(entry.videoUrl),
+                        selected: Boolean(entry.videoUrl),
+                        error: '',
+                    };
+                } catch (error) {
+                    console.error('[Douyin Downloader] Batch entry resolve failed.', pageUrl, error);
+                    entries[index] = {
+                        id: `entry-${index}-${Date.now()}`,
+                        pageUrl,
+                        videoUrl: '',
+                        alternateUrls: [],
+                        videoId: videoId || extractVideoId(pageUrl),
+                        meta: chooseBetterMeta(domMeta, {
+                            title: `Video ${index + 1}`,
+                            author: AUTHOR_FALLBACK,
+                        }),
+                        available: Boolean(pageUrl),
+                        selected: Boolean(pageUrl),
+                        error: '',
+                    };
+                }
+
+                completedCount += 1;
+                const progressMessage = `Preparing batch list...\n${completedCount}/${links.length}\n${pageUrl}`;
+                setPrimaryButtonState(`Scanning ${completedCount}/${links.length}`, true, 'batch');
+                setStatus(progressMessage);
+                if (state.batchModalLoading) {
+                    setBatchModalLoading(true, progressMessage);
+                }
             }
+        };
 
-            try {
-                const entry = await resolveVideoEntry(pageUrl, {
-                    allowUnknownVideoId: true,
-                });
-                entries.push({
-                    id: `entry-${index}-${Date.now()}`,
-                    pageUrl,
-                    videoUrl: entry.videoUrl,
-                    videoId: videoId || extractVideoId(pageUrl) || extractVideoId(entry.videoUrl),
-                    meta: chooseBetterMeta(domMeta, entry.meta),
-                    available: Boolean(entry.videoUrl),
-                    selected: Boolean(entry.videoUrl),
-                    error: '',
-                });
-            } catch (error) {
-                console.error('[Douyin Downloader] Batch entry resolve failed.', pageUrl, error);
-                entries.push({
-                    id: `entry-${index}-${Date.now()}`,
-                    pageUrl,
-                    videoUrl: '',
-                    videoId: videoId || extractVideoId(pageUrl),
-                    meta: chooseBetterMeta(domMeta, {
-                        title: `Video ${index + 1}`,
-                        author: AUTHOR_FALLBACK,
-                    }),
-                    available: Boolean(pageUrl),
-                    selected: Boolean(pageUrl),
-                    error: '',
-                });
-            }
-
-            await wait(120);
-        }
-
+        const workerCount = Math.min(BATCH_ENTRY_RESOLVE_CONCURRENCY, links.length);
+        await Promise.all(Array.from({ length: workerCount }, () => resolveNextEntry()));
         return entries;
     }
 
@@ -4527,6 +5396,7 @@
 
         try {
             let successCount = 0;
+            let videoOnlyCount = 0;
             const filenameMap = buildUniqueBatchFilenames(selectedEntries);
             const directoryHandle = await ensureWritableBatchDirectory();
 
@@ -4544,18 +5414,87 @@
                         entry = {
                             ...selectedEntry,
                             videoUrl: resolvedEntry.videoUrl,
+                            alternateUrls: Array.isArray(resolvedEntry.alternateUrls) ? resolvedEntry.alternateUrls : [],
                             videoId: selectedEntry.videoId || resolvedEntry.videoId || extractVideoId(resolvedEntry.videoUrl),
                             meta: chooseBetterMeta(selectedEntry.meta, resolvedEntry.meta),
                         };
                     }
 
                     setStatus(`Downloading ${index + 1}/${selectedEntries.length}...\n${entry.meta.title}`);
-                    await downloadVideoUrl(
-                        entry.videoUrl,
-                        filenameMap.get(entry.id) || buildFilename(entry.meta),
-                        null,
-                        { directoryHandle }
-                    );
+                    const filename = filenameMap.get(entry.id) || buildFilename(entry.meta);
+                    let downloadResult;
+                    let lastProgressRenderAt = 0;
+                    const updateBatchDownloadProgress = (progress) => {
+                        const loaded = Number(progress?.loaded) || 0;
+                        const total = Number(progress?.total) || 0;
+                        const now = Date.now();
+                        const isComplete = total > 0 && loaded >= total;
+
+                        if (!isComplete && now - lastProgressRenderAt < 200) {
+                            return;
+                        }
+                        lastProgressRenderAt = now;
+
+                        const percent = total > 0
+                            ? Math.max(0, Math.min(100, Math.round((loaded / total) * 100)))
+                            : 0;
+                        const label = percent > 0
+                            ? `Batch ${index + 1}/${selectedEntries.length} ${percent}%`
+                            : `Batch ${index + 1}/${selectedEntries.length}`;
+
+                        setPrimaryButtonState(label, true, 'batch');
+                        setStatus([
+                            `Downloading ${index + 1}/${selectedEntries.length}:`,
+                            entry.meta.title,
+                            filename,
+                            formatDownloadProgress(loaded, total),
+                        ].join('\n'));
+                    };
+
+                    try {
+                        downloadResult = await downloadVideoEntry(entry, filename, updateBatchDownloadProgress, {
+                            downloadOptions: { directoryHandle },
+                            onAttempt: ({ index: candidateIndex, total }) => {
+                                if (candidateIndex > 0) {
+                                    setStatus(`Trying alternate URL ${candidateIndex + 1}/${total} for ${index + 1}/${selectedEntries.length}:\n${entry.meta.title}`);
+                                }
+                            },
+                        });
+                    } catch (initialError) {
+                        const attemptedUrls = Array.isArray(initialError?.attemptedUrls)
+                            ? initialError.attemptedUrls
+                            : getEntryCandidateUrls(entry);
+                        setStatus(`Refreshing expired video URL ${index + 1}/${selectedEntries.length}...\n${entry.meta.title}`);
+
+                        const resolvedEntry = await resolveVideoEntry(selectedEntry.pageUrl, {
+                            allowUnknownVideoId: true,
+                            forceRefresh: true,
+                        });
+                        const refreshedEntry = {
+                            ...entry,
+                            videoUrl: resolvedEntry.videoUrl,
+                            alternateUrls: Array.isArray(resolvedEntry.alternateUrls) ? resolvedEntry.alternateUrls : [],
+                            videoId: entry.videoId || resolvedEntry.videoId || extractVideoId(resolvedEntry.videoUrl),
+                            meta: chooseBetterMeta(entry.meta, resolvedEntry.meta),
+                        };
+
+                        const refreshedCandidates = getEntryCandidateUrls(refreshedEntry, {
+                            excludeUrls: attemptedUrls,
+                        });
+                        if (!refreshedCandidates.length) {
+                            throw initialError;
+                        }
+
+                        downloadResult = await downloadVideoEntry(refreshedEntry, filename, updateBatchDownloadProgress, {
+                            excludeUrls: attemptedUrls,
+                            downloadOptions: { directoryHandle },
+                        });
+                    }
+                    if (downloadResult?.mediaInfo?.conclusive
+                        && downloadResult.mediaInfo.video
+                        && !downloadResult.mediaInfo.audio) {
+                        videoOnlyCount += 1;
+                    }
                     successCount += 1;
                 } catch (error) {
                     console.error('[Douyin Downloader] Selected batch item failed.', selectedEntry.pageUrl, error);
@@ -4565,7 +5504,10 @@
                 await wait(BATCH_DELAY_MS);
             }
 
-            setStatus(`Batch finished.\nDownloaded ${successCount}/${selectedEntries.length} selected videos.`);
+            const videoOnlyMessage = videoOnlyCount > 0
+                ? `\n${videoOnlyCount} file(s) had no detectable audio track.`
+                : '';
+            setStatus(`Batch finished.\nDownloaded ${successCount}/${selectedEntries.length} selected videos.${videoOnlyMessage}`);
         } catch (error) {
             console.error('[Douyin Downloader] Selected batch failed.', error);
             setStatus(`Batch failed:\n${error.message}`);
@@ -4695,6 +5637,7 @@
         }
 
         addStyleBlock(style);
+        ensureLiquidGlassFilter();
 
         const panel = document.createElement('div');
         panel.id = PANEL_ID;
@@ -4886,6 +5829,138 @@
         updateBatchDirectoryHint();
     }
 
+    function buildDownloadDiagnostics() {
+        const activeVideo = findBestVideo();
+        const videos = Array.from(document.querySelectorAll('video')).map((video, index) => {
+            let rect = null;
+            try {
+                const bounds = video.getBoundingClientRect();
+                rect = {
+                    top: Math.round(bounds.top),
+                    left: Math.round(bounds.left),
+                    width: Math.round(bounds.width),
+                    height: Math.round(bounds.height),
+                };
+            } catch (error) {
+                rect = null;
+            }
+
+            return {
+                index,
+                active: video === activeVideo,
+                paused: Boolean(video.paused),
+                readyState: Number(video.readyState) || 0,
+                currentTime: Number.isFinite(Number(video.currentTime)) ? Number(video.currentTime) : null,
+                duration: Number.isFinite(Number(video.duration)) ? Number(video.duration) : null,
+                videoId: findNearbyVideoId(video),
+                sources: getVideoCandidateUrls(video).map((url) => sanitizeDiagnosticUrl(url)),
+                rect,
+            };
+        });
+        const playerNames = [
+            'player',
+            'nextPlayer',
+            'playerPreloader',
+            'newPlayerPreloader',
+            '__XG_BIG_CARD_QUICK_PLAYER__',
+            '__INLINE_PLAYER_DATA__',
+        ];
+        const players = playerNames.map((name) => {
+            const playerObject = getPagePlayerObject(name);
+            if (!playerObject) {
+                return null;
+            }
+
+            const entry = extractGlobalPlayerEntry(playerObject);
+            return {
+                name,
+                videoId: entry?.videoId || '',
+                videoUrl: sanitizeDiagnosticUrl(entry?.videoUrl || ''),
+                alternateUrlCount: Array.isArray(entry?.alternateUrls) ? entry.alternateUrls.length : 0,
+                dashOnly: Boolean(entry?.dashOnly),
+                isActive: safeReadProperty(playerObject, 'isActive') === true,
+                isUserActive: safeReadProperty(playerObject, 'isUserActive') === true,
+                isPlaying: safeReadProperty(playerObject, 'isPlaying') === true,
+                currentTime: Number(safeReadProperty(playerObject, 'currentTime') ?? safeReadProperty(playerObject, '_currentTime')) || 0,
+                duration: Number(safeReadProperty(playerObject, 'duration') ?? safeReadProperty(playerObject, '_duration')) || 0,
+            };
+        }).filter(Boolean);
+        const activeVideoId = activeVideo ? findNearbyVideoId(activeVideo) : extractVideoId(location.href);
+        const cachedRecord = activeVideoId ? getStructuredVideoRecord(activeVideoId, '') : null;
+
+        return {
+            script: {
+                name: 'Douyin Downloader',
+                version: SCRIPT_VERSION,
+            },
+            generatedAt: new Date().toISOString(),
+            page: {
+                url: sanitizeDiagnosticUrl(location.href, { preservePageParams: true }),
+                title: normalizeText(document.title),
+                flags: {
+                    recommend: isRecommendPage(location.href),
+                    searchModal: isSearchModalPage(location.href),
+                    feedStyle: isFeedStyleCurrentVideoPage(location.href),
+                    profileBatchEligible: isProfileBatchEligiblePage(location.href),
+                },
+            },
+            activeVideoId,
+            videos,
+            players,
+            cache: {
+                structuredMapSize: state.videoDataCache.size,
+                structuredRecordCount: state.videoDataRecords.length,
+                mediaUrlRecordCount: state.mediaUrlRecords.length,
+                activeRecord: cachedRecord ? {
+                    videoId: cachedRecord.videoId || '',
+                    videoUrl: sanitizeDiagnosticUrl(cachedRecord.videoUrl || ''),
+                    title: cachedRecord.meta?.title || '',
+                    author: cachedRecord.meta?.author || '',
+                } : null,
+            },
+            recentMediaUrls: state.mediaUrlRecords.slice(-12).map((record) => ({
+                source: record.source || '',
+                score: Number(record.score) || 0,
+                url: sanitizeDiagnosticUrl(record.url || ''),
+            })),
+        };
+    }
+
+    async function copyDownloadDiagnostics() {
+        const diagnosticsText = JSON.stringify(buildDownloadDiagnostics(), null, 2);
+
+        try {
+            if (typeof GM_setClipboard === 'function') {
+                GM_setClipboard(diagnosticsText, 'text');
+                setStatus('Diagnostic information copied to the clipboard.');
+                return diagnosticsText;
+            }
+
+            if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+                await navigator.clipboard.writeText(diagnosticsText);
+                setStatus('Diagnostic information copied to the clipboard.');
+                return diagnosticsText;
+            }
+        } catch (error) {
+            console.warn('[Douyin Downloader] Failed to copy diagnostic information.', error);
+        }
+
+        console.info('[Douyin Downloader] Diagnostic information:', diagnosticsText);
+        setStatus('Could not access the clipboard. Diagnostic information was printed to the console.');
+        return diagnosticsText;
+    }
+
+    function installDiagnosticMenu() {
+        if (state.diagnosticMenuInstalled || typeof GM_registerMenuCommand !== 'function') {
+            return;
+        }
+
+        GM_registerMenuCommand('复制下载诊断信息', () => {
+            void copyDownloadDiagnostics();
+        });
+        state.diagnosticMenuInstalled = true;
+    }
+
     function installObservers() {
         if (state.observer) {
             state.observer.disconnect();
@@ -4945,6 +6020,7 @@
         noteLocationChange();
         ensurePanel();
         ensureBatchModal();
+        installDiagnosticMenu();
         primeStructuredDataCacheFromDocument(document);
         document.addEventListener('keydown', handleKeydown, true);
         window.addEventListener('resize', () => {
@@ -4957,6 +6033,30 @@
         scheduleRefresh(0);
 
         console.log('[Douyin Downloader] Ready. Press Q or click the floating download button.');
+    }
+
+    if (typeof module === 'object' && module?.exports) {
+        module.exports = {
+            cacheStructuredVideoRecords,
+            downloadVideoEntry,
+            downloadVideoUrl,
+            getEntryCandidateUrls,
+            getStructuredVideoCacheSize,
+            getStructuredVideoRecord,
+            gmDownload,
+            inspectIsoBmffBlob,
+            inspectIsoBmffBytes,
+            inspectIsoBmffRangeBytes,
+            isFeedStyleCurrentVideoPage,
+            isFriendFeedPage,
+            isPlayableVideoUrl,
+            isProfileBatchEligiblePage,
+            isRecommendPage,
+            isSearchModalPage,
+            sanitizeDiagnosticUrl,
+            validateBlobMediaTracks,
+        };
+        return;
     }
 
     boot();
